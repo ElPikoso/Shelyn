@@ -317,7 +317,7 @@ const q=new URLSearchParams(location.search).get('sala');
 if(/^\d{4}$/.test(q||'')){$('code').value=q;$('joinBtn').disabled=false;$('invite').hidden=false;$('invite').textContent=`Te han invitado a la sala ${q}. Pulsa «Unirse a la sala» para escuchar.`;
   if(/Android/i.test(navigator.userAgent)){ // intent:// dirigido SOLO al paquete de Shelyn (ninguna otra app puede interceptarlo)
     const fb=encodeURIComponent('https://github.com/ElPikoso/Shelyn-Releases/releases/latest');
-    $('openApp').href=`intent://join?sala=${q}#Intent;scheme=shelyn;package=com.example.shelyn;S.browser_fallback_url=${fb};end`;$('openApp').hidden=false}}
+    $('openApp').href=`intent://join?sala=${q}#Intent;scheme=shelyn;package=com.shelyn.app;S.browser_fallback_url=${fb};end`;$('openApp').hidden=false}}
 
 // Host
 const canHost=!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia)&&!/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
