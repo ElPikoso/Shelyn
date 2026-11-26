@@ -205,10 +205,14 @@ class Room{
   }
   reject(){this.pending=null;clearTimeout(this.t.acc);this.rearm()}
   /* invitado */
-  guestStart(){
+  async guestStart(){
     this.set('CONNECTING');
+    const f=await free(this.code);                 // null = sin conexión con el servidor · true = sala vacía · false = sala existe
+    if(this.closed)return;
+    if(f===null)return this.end('FAILED');
+    if(f)return this.end('NOTFOUND');
     this.stop=listen(this.code,(p,v)=>this.onEvent(p,v),()=>this.end('FAILED'));
-    this.later('offer',10000,()=>{if(!this.descSeen)this.end('NOTFOUND')});
+    this.later('offer',10000,()=>{if(!this.descSeen)this.end(this.snap?'NOTFOUND':'FAILED')});
   }
   async answer(o){
     const pc=this.peer();await pc.setRemoteDescription(o);
@@ -302,7 +306,7 @@ function guestUi(s){
   pill($('gPill'),s);const live=LIVE(s);
   $('joinBtn').textContent=live?'Desconectar':'Unirse a la sala';$('joinBtn').className='btn'+(live?' stop':'');
   $('joinBtn').disabled=!live&&!codeOk();$('code').disabled=live;
-  if(!live){$('tap').hidden=true;a.srcObject=null;$('gStats').textContent=''}
+  if(!live){$('tap').hidden=true;a.srcObject=null;$('gStats').textContent=s==='FAILED'?'No se pudo contactar con el servidor. Revisa tu conexión a Internet.':''}
 }
 $('joinBtn').onclick=()=>{
   if(guestRoom){guestRoom.end('IDLE');return}
@@ -326,7 +330,7 @@ function hostUi(s){
   pill($('hPill'),s);const live=LIVE(s);$('modal').hidden=s!=='APPROVAL';
   $('hostBtn').textContent=live?'Detener y cerrar sala':'Elegir pestaña y crear sala';$('hostBtn').className='btn'+(live?' stop':'');
   $('shareBtn').hidden=!(live&&hostRoom&&hostRoom.code);
-  if(!live){$('hStats').textContent='';$('hCode').textContent='– – – –';$('hCode').classList.add('off')}
+  if(!live){$('hStats').textContent=s==='FAILED'?'No se pudo contactar con el servidor. Revisa tu conexión a Internet.':'';$('hCode').textContent='– – – –';$('hCode').classList.add('off')}
 }
 $('hostBtn').onclick=async()=>{
   if(hostRoom){hostRoom.end('IDLE');return}
