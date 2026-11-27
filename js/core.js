@@ -21,9 +21,25 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
 /* Apodos y lista de conectados (textContent: un apodo nunca se interpreta como HTML) */
 const nickName=v=>String(v||'').trim().slice(0,20);
-function showPeople(id,list){
+function showPeople(id,list,onKick){
   const el=$(id);el.hidden=!list.length;
-  el.textContent=list.length?`Conectados (${list.length}):\n${list.join('\n')}`:'';
+  const key=JSON.stringify(list);
+  if(el.dataset.key===key)return;   // no redibujar en cada sondeo (se perderían clics)
+  el.dataset.key=key;
+  el.textContent=list.length?`Conectados (${list.length}):`:'';
+  for(const p of list){
+    const row=document.createElement('span');
+    row.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px';
+    row.textContent=p.label??p;
+    if(onKick){
+      const b=document.createElement('button');
+      b.type='button';b.textContent='Echar';b.className='btn stop';
+      b.style.cssText='width:auto;margin:0;padding:4px 10px';
+      b.onclick=()=>onKick(p.id);
+      row.append(b);
+    }
+    el.append(row);
+  }
 }
 
 /* Estado compartido entre archivos */
