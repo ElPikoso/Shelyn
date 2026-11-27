@@ -132,7 +132,7 @@ async function getAuth(){
 }
 const fbUrl=(p,tok)=>`${C.DB}/${p}.json?auth=${encodeURIComponent(tok)}`;
 
-/* ---------- SERVIDORES ICE (STUN + TURN OPCIONAL DESDE WORKER) ---------- */
+/* ---------- SERVIDORES ICE (STUN + TURN DESDE WORKER) ---------- */
 let cachedIce=null;
 async function getIceServers(){
   if(cachedIce)return cachedIce;
@@ -142,11 +142,13 @@ async function getIceServers(){
       const r=await fetch(`${C.SFU_PROXY}/turn`,{method:'POST'});
       if(r.ok){
         const d=await r.json();
-        if(Array.isArray(d.iceServers))ice.push(...d.iceServers);
+        if(Array.isArray(d.iceServers)&&d.iceServers.length){
+          ice.push(...d.iceServers);
+          cachedIce=ice;
+        }
       }
     }catch{}
   }
-  cachedIce=ice;
   return ice;
 }
 
@@ -195,36 +197,54 @@ async function fbPatch(p,d){const {token}=await getAuth();const r=await fetch(fb
 async function fbPost(p,d){const {token}=await getAuth();const r=await fetch(fbUrl(p,token),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error('FB POST '+r.status)}
 async function fbDel(p){try{const {token}=await getAuth();await fetch(fbUrl(p,token),{method:'DELETE'})}catch{}}
 
-/* ---------- GESTOR WEBRTC (P2P + SFU + COMPATIBLE APP ANDROID) ---------- */
+/* ---------- GESTOR WEBRTC (P2P + SFU + MÓVIL INVITADO WEB) ---------- */
 class Room{
   constructor(role,code,onState){
     this.role=role;this.code=code;this.onState=onState;
     this.pc=null;this.es=null;this.stream=null;this.dead=false;
     this.onTrack=null;this.onStats=null;this.onEnd=null;
     this.seen=new Set();this.timer=null;this.mode='p2p';this.sfuKey=null;
-    this.activeGuestId=null;
+    this.activeGuestId=null;this.myUid=null;
   }
   state(s){if(!this.dead)this.onState(s)}
   async mkPc(isSfu=false){
     const ice=await getIceServers();
     const pc=new RTCPeerConnection({iceServers:ice});
     if(!isSfu){
-      const candPath=this.role==='host'?'hostCandidates':'guestCandidates';
       pc.onicecandidate=e=>{
         if(e.candidate&&!this.dead){
-          fbPost(`salas/${this.code}/${candPath}`,{
+          const payload={
             sdp:e.candidate.candidate,
             sdpMid:e.candidate.sdpMid||'',
             sdpMLineIndex:e.candidate.sdpMLineIndex??0
-          }).catch(()=>{});
+          };
+          if(this.role==='host'){
+            fbPost(`salas/${this.code}/hostCandidates`,payload).catch(()=>{});
+          }else{
+            fbPost(`salas/${this.code}/guestCandidates`,payload).catch(()=>{});
+            if(this.myUid){
+              fbPost(`salas/${this.code}/guests/${this.myUid}/candidates`,payload).catch(()=>{});
+            }
+          }
         }
       };
     }
+    pc.oniceconnectionstatechange=()=>{
+      if(this.dead)return;
+      const iceSt=pc.iceConnectionState;
+      if(this.role==='guest'&&iceSt==='checking'){
+        $('gStats').textContent='Negociando red (ICE/TURN)…';
+      }else if(this.role==='guest'&&iceSt==='failed'){
+        $('gStats').textContent='Bloqueo de red (NAT). Verifica TURN en Cloudflare Worker.';
+      }
+    };
     pc.onconnectionstatechange=()=>{
       if(this.dead)return;
       const st=pc.connectionState;
-      if(st==='connected')this.state(isSfu?'CONNECTED_SFU':'CONNECTED');
-      else if(st==='disconnected')this.state('RECONNECTING');
+      if(st==='connected'){
+        if(this.role==='guest')$('gStats').textContent=isSfu?'Modo grupal Cloudflare SFU':'Conexión directa P2P';
+        this.state(isSfu?'CONNECTED_SFU':'CONNECTED');
+      }else if(st==='disconnected')this.state('RECONNECTING');
       else if(st==='failed'||st==='closed')this.end('IDLE');
     };
     if(this.role==='guest'){
@@ -333,6 +353,9 @@ class Room{
   }
   async guestStart(){
     this.state('CONNECTING');
+    $('gStats').textContent='Buscando sala…';
+    const {uid}=await getAuth();
+    this.myUid=uid;
     const room=await fbGet(`salas/${this.code}`).catch(()=>null);
     if(!room||(!room.offer&&!room.sfu)){this.end('FAILED');return}
 
@@ -348,8 +371,25 @@ class Room{
     const ans=await pc.createAnswer();
     ans.sdp=tuneOpus(ans.sdp);
     await pc.setLocalDescription(ans);
-    await fbPatch(`salas/${this.code}`,{answer:{type:'answer',sdp:ans.sdp}});
+
+    const ansPayload={type:'answer',sdp:ans.sdp};
+    await fbPatch(`salas/${this.code}`,{answer:ansPayload});
+    await fbPatch(`salas/${this.code}/guests/${uid}`,{joinedAt:Date.now(),answer:ansPayload}).catch(()=>{});
+    $('gStats').textContent='Esperando aceptación del anfitrión…';
+
     if(room.hostCandidates)await this.addCands(room.hostCandidates);
+
+    this.timer=setInterval(async()=>{
+      if(this.dead)return;
+      if(this.pc&&this.pc.connectionState==='connected'){clearInterval(this.timer);return}
+      const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
+      if(!snap)return;
+      if(snap.sfu&&snap.sfu.sessionId&&snap.sfu.trackName&&this.mode!=='sfu'){
+        await this.connectSfuGuest(snap.sfu);
+        return;
+      }
+      if(snap.hostCandidates)await this.addCands(snap.hostCandidates);
+    },1500);
 
     await this.listen(`salas/${this.code}`,async(p,d)=>{
       if(this.dead)return;
@@ -373,6 +413,7 @@ class Room{
     this.sfuKey=key;
     this.mode='sfu';
     this.state('CONNECTING');
+    $('gStats').textContent='Conectando por Cloudflare SFU…';
     if(this.pc){try{this.pc.close()}catch{}this.pc=null}
 
     const ses=await sfuCall('/sessions/new','POST');
@@ -417,6 +458,7 @@ class Room{
     if(this.pc)this.pc.close();
     if(this.stream)this.stream.getTracks().forEach(t=>t.stop());
     if(this.role==='host')fbDel(`salas/${this.code}`);
+    else if(this.myUid)fbDel(`salas/${this.code}/guests/${this.myUid}`);
     this.onState(s);
     if(this.onEnd)this.onEnd();
   }
@@ -472,7 +514,7 @@ function guestUi(s){
   $('code').disabled=live;
   if(!live){
     rxr=null;media(false);$('tap').hidden=true;a.srcObject=null;
-    $('gStats').textContent=s==='FAILED'?'No se pudo contactar con el servidor o la sala no existe.':'';
+    if(s==='FAILED')$('gStats').textContent='No se pudo contactar con el servidor o la sala no existe.';
   }
 }
 
