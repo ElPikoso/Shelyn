@@ -50,3 +50,12 @@ input.npf{font-size:.85rem;font-weight:500;letter-spacing:normal;text-align:left
 @keyframes eq{0%,100%{transform:scaleY(.25)}50%{transform:scaleY(1)}}
 @media (prefers-reduced-motion:reduce){.eq i{animation:none;transform:scaleY(.6)}}
 [hidden]{display:none!important}
+
+/* Barra de volumen del invitado */
+.volr{margin-bottom:16px}
+.volr label{display:flex;justify-content:space-between}
+input.vol{-webkit-appearance:none;appearance:none;height:6px;padding:0;margin:8px 0 0;border:0;border-radius:99px;cursor:pointer;
+  background:linear-gradient(to right,var(--acc) var(--p,100%),var(--in) var(--p,100%));text-align:left;letter-spacing:normal;font-size:1rem}
+input.vol::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#fff;border:0;box-shadow:0 1px 4px rgba(0,0,0,.5)}
+input.vol::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;border:0;box-shadow:0 1px 4px rgba(0,0,0,.5)}
+input.vol:focus-visible{outline:2px solid var(--acc);outline-offset:6px}

@@ -24,8 +24,19 @@ function silentWav(){
 const play=()=>a.play().then(()=>$('tap').hidden=true).catch(()=>$('tap').hidden=false);
 $('tap').onclick=play;
 
+/* Volumen del invitado (a.volume). En iOS el volumen del <audio> es de solo lectura: ahí se oculta y valen los botones del móvil */
+const volOk=(()=>{try{a.volume=.5;const ok=a.volume===.5;a.volume=1;return ok}catch{return false}})();
+function setVol(p){
+  p=Math.max(0,Math.min(100,Math.round(p)));
+  a.volume=p/100;
+  $('vol').value=p;$('vol').style.setProperty('--p',p+'%');$('volPct').textContent=p+'%';
+}
+{let v=100;try{const x=parseInt(localStorage.getItem('shelyn_vol'),10);if(x>=0&&x<=100)v=x}catch{}setVol(v)}
+$('vol').oninput=()=>{setVol(+$('vol').value);try{localStorage.setItem('shelyn_vol',$('vol').value)}catch{}};
+
 function guestUi(s){
   pill($('gPill'),s);const live=LIVE(s);
+  $('volRow').hidden=!(live&&volOk);
   $('joinBtn').textContent=live?'Desconectar':'Unirse a la sala';
   $('joinBtn').className='btn'+(live?' stop':'');
   $('joinBtn').disabled=!live&&!codeOk();
