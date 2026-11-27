@@ -91,12 +91,12 @@ const C={
   DB:'https://shelyn-86208-default-rtdb.europe-west1.firebasedatabase.app',
   KEY:'AIzaSyCs-uCindNEB647fzhdZn2gLW52zigJwMg',
   BASE:'https://elpikoso.github.io/Shelyn/',
+  SFU_PROXY:'https://shelyn-sfu.xterrablazexop.workers.dev',
   STUN:'stun:stun.l.google.com:19302',
   BR:80000,
   JB:40,
   JBH:250,
-  PT:20,
-  TURN:{urls:[],username:'',credential:''}
+  PT:20
 };
 
 const $=id=>document.getElementById(id), a=$('player');
@@ -107,6 +107,7 @@ const ST={
   APPROVAL:['Invitado pidiendo entrar','amber'],
   CONNECTING:['Conectando…','amber'],
   CONNECTED:['Conectado · audio en directo','green'],
+  CONNECTED_SFU:['Conectado · sala grupal (SFU)','green'],
   RECONNECTING:['Reconectando…','amber'],
   FAILED:['Error de conexión','grey']
 };
@@ -130,6 +131,35 @@ async function getAuth(){
   return authState;
 }
 const fbUrl=(p,tok)=>`${C.DB}/${p}.json?auth=${encodeURIComponent(tok)}`;
+
+/* ---------- SERVIDORES ICE (STUN + TURN OPCIONAL DESDE WORKER) ---------- */
+let cachedIce=null;
+async function getIceServers(){
+  if(cachedIce)return cachedIce;
+  const ice=[{urls:C.STUN}];
+  if(C.SFU_PROXY){
+    try{
+      const r=await fetch(`${C.SFU_PROXY}/turn`,{method:'POST'});
+      if(r.ok){
+        const d=await r.json();
+        if(Array.isArray(d.iceServers))ice.push(...d.iceServers);
+      }
+    }catch{}
+  }
+  cachedIce=ice;
+  return ice;
+}
+
+/* ---------- CLIENTE CLOUDFLARE SFU VÍA WORKER ---------- */
+async function sfuCall(path,method,body){
+  const r=await fetch(`${C.SFU_PROXY}${path}`,{
+    method,
+    headers:{'Content-Type':'application/json'},
+    body:body?JSON.stringify(body):undefined
+  });
+  if(!r.ok)throw new Error('SFU '+r.status);
+  return r.json();
+}
 
 /* ---------- SDP OPUS (80 kbps estéreo + FEC + ptime 20) ---------- */
 function tuneOpus(sdp){
@@ -165,33 +195,34 @@ async function fbPatch(p,d){const {token}=await getAuth();const r=await fetch(fb
 async function fbPost(p,d){const {token}=await getAuth();const r=await fetch(fbUrl(p,token),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status)}
 async function fbDel(p){try{const {token}=await getAuth();await fetch(fbUrl(p,token),{method:'DELETE'})}catch{}}
 
-/* ---------- GESTOR WEBRTC ---------- */
+/* ---------- GESTOR WEBRTC (P2P + SFU) ---------- */
 class Room{
   constructor(role,code,onState){
     this.role=role;this.code=code;this.onState=onState;
     this.pc=null;this.es=null;this.stream=null;this.dead=false;
     this.onTrack=null;this.onStats=null;this.onEnd=null;
-    this.seen=new Set();this.timer=null;
+    this.seen=new Set();this.timer=null;this.mode='p2p';this.sfuKey=null;
   }
   state(s){if(!this.dead)this.onState(s)}
-  mkPc(){
-    const ice=[{urls:C.STUN}];
-    if(C.TURN.urls&&C.TURN.urls.length)ice.push(C.TURN);
+  async mkPc(isSfu=false){
+    const ice=await getIceServers();
     const pc=new RTCPeerConnection({iceServers:ice});
-    const candPath=this.role==='host'?'hostCandidates':'guestCandidates';
-    pc.onicecandidate=e=>{
-      if(e.candidate&&!this.dead){
-        fbPost(`salas/${this.code}/${candPath}`,{
-          sdp:e.candidate.candidate,
-          sdpMid:e.candidate.sdpMid||'',
-          sdpMLineIndex:e.candidate.sdpMLineIndex??0
-        }).catch(()=>{});
-      }
-    };
+    if(!isSfu){
+      const candPath=this.role==='host'?'hostCandidates':'guestCandidates';
+      pc.onicecandidate=e=>{
+        if(e.candidate&&!this.dead){
+          fbPost(`salas/${this.code}/${candPath}`,{
+            sdp:e.candidate.candidate,
+            sdpMid:e.candidate.sdpMid||'',
+            sdpMLineIndex:e.candidate.sdpMLineIndex??0
+          }).catch(()=>{});
+        }
+      };
+    }
     pc.onconnectionstatechange=()=>{
       if(this.dead)return;
       const st=pc.connectionState;
-      if(st==='connected')this.state('CONNECTED');
+      if(st==='connected')this.state(isSfu?'CONNECTED_SFU':'CONNECTED');
       else if(st==='disconnected')this.state('RECONNECTING');
       else if(st==='failed'||st==='closed')this.end('IDLE');
     };
@@ -215,7 +246,7 @@ class Room{
     this.es=es;
   }
   async addCands(obj){
-    if(!obj||!this.pc)return;
+    if(!obj||!this.pc||this.mode==='sfu')return;
     for(const [k,c] of Object.entries(obj)){
       if(this.seen.has(k)||!c||!c.sdp)continue;
       this.seen.add(k);
@@ -227,7 +258,7 @@ class Room{
     stream.getAudioTracks()[0].onended=()=>this.end('IDLE');
     this.state('CREATING');
     const {uid}=await getAuth();
-    const pc=this.mkPc();
+    const pc=await this.mkPc(false);
     stream.getAudioTracks().forEach(t=>pc.addTrack(t,stream));
     const off=await pc.createOffer();
     off.sdp=tuneOpus(off.sdp);
@@ -263,8 +294,17 @@ class Room{
   async guestStart(){
     this.state('CONNECTING');
     const room=await fbGet(`salas/${this.code}`).catch(()=>null);
-    if(!room||!room.offer){this.end('FAILED');return}
-    const pc=this.mkPc();
+    if(!room||(!room.offer&&!room.sfu)){this.end('FAILED');return}
+
+    // Si la sala ya está en modo Cloudflare SFU (2+ invitados)
+    if(room.sfu&&room.sfu.sessionId&&room.sfu.trackName){
+      await this.connectSfuGuest(room.sfu);
+      return;
+    }
+
+    // Modo P2P directo (1er invitado)
+    this.mode='p2p';
+    const pc=await this.mkPc(false);
     pc.addTransceiver('audio',{direction:'recvonly'});
     await pc.setRemoteDescription({type:'offer',sdp:tuneOpus(room.offer.sdp)});
     const ans=await pc.createAnswer();
@@ -272,10 +312,64 @@ class Room{
     await pc.setLocalDescription(ans);
     await fbPatch(`salas/${this.code}`,{answer:{type:'answer',sdp:ans.sdp}});
     if(room.hostCandidates)await this.addCands(room.hostCandidates);
-    await this.listen(`salas/${this.code}/hostCandidates`,async(p,d)=>{
-      if(p==='/')await this.addCands(d);
-      else if(d)await this.addCands({[p.slice(1)]:d});
+
+    await this.listen(`salas/${this.code}`,async(p,d)=>{
+      if(this.dead)return;
+      if(p==='/'&&d){
+        if(d.sfu&&d.sfu.sessionId&&d.sfu.trackName&&this.mode!=='sfu'){
+          await this.connectSfuGuest(d.sfu);
+          return;
+        }
+        if(d.hostCandidates)await this.addCands(d.hostCandidates);
+      }else if(p==='/sfu'&&d&&d.sessionId&&d.trackName&&this.mode!=='sfu'){
+        await this.connectSfuGuest(d);
+      }else if(p.startsWith('/hostCandidates')&&this.mode==='p2p'){
+        if(p==='/hostCandidates')await this.addCands(d);
+        else if(d)await this.addCands({[p.split('/').pop()]:d});
+      }
     });
+  }
+  async connectSfuGuest(sfu){
+    const key=`${sfu.sessionId}:${sfu.trackName}`;
+    if(this.sfuKey===key)return;
+    this.sfuKey=key;
+    this.mode='sfu';
+    this.state('CONNECTING');
+    if(this.pc){try{this.pc.close()}catch{}this.pc=null}
+
+    const ses=await sfuCall('/sessions/new','POST');
+    const guestSessionId=ses.sessionId;
+    const pc=await this.mkPc(true);
+    pc.addTransceiver('audio',{direction:'recvonly'});
+
+    const off=await pc.createOffer();
+    off.sdp=tuneOpus(off.sdp);
+    await pc.setLocalDescription(off);
+
+    const trRes=await sfuCall(`/sessions/${guestSessionId}/tracks/new`,'POST',{
+      sessionDescription:{type:'offer',sdp:off.sdp},
+      tracks:[{
+        location:'remote',
+        sessionId:sfu.sessionId,
+        trackName:sfu.trackName,
+        mid:'0'
+      }]
+    });
+
+    if(trRes.sessionDescription&&trRes.sessionDescription.sdp){
+      await pc.setRemoteDescription({
+        type:trRes.sessionDescription.type||'answer',
+        sdp:tuneOpus(trRes.sessionDescription.sdp)
+      });
+    }
+    if(trRes.requiresImmediateRenegotiation){
+      const ans2=await pc.createAnswer();
+      ans2.sdp=tuneOpus(ans2.sdp);
+      await pc.setLocalDescription(ans2);
+      await sfuCall(`/sessions/${guestSessionId}/renegotiate`,'PUT',{
+        sessionDescription:{type:'answer',sdp:ans2.sdp}
+      });
+    }
   }
   end(s='IDLE'){
     if(this.dead)return;
