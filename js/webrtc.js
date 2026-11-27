@@ -33,8 +33,12 @@ async function sfuCall(path,method,body){
     headers:{'Content-Type':'application/json'},
     body:body?JSON.stringify(body):undefined
   });
-  if(!r.ok)throw new Error('SFU '+r.status);
-  return r.json();
+  if(!r.ok){let t='';try{t=(await r.text()).slice(0,200)}catch{}throw new Error(`SFU ${r.status} ${method} ${path} ${t}`)}
+  const d=await r.json();
+  // Cloudflare a veces responde 200 con errorCode en el cuerpo o dentro de tracks[]
+  const te=d&&d.tracks&&d.tracks.find&&d.tracks.find(t=>t&&t.errorCode);
+  if(d&&(d.errorCode||te))throw new Error(`SFU ${path}: ${d.errorCode||te.errorCode} ${d.errorDescription||(te&&te.errorDescription)||''}`);
+  return d;
 }
 
 /* ---------- SDP OPUS (96 kbps estéreo + FEC + ptime 10 / minptime 10 / maxptime 20) ----------
