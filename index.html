@@ -1,364 +1,91 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="dark">
-<title>Shelyn Web</title>
-<style>
-:root{--bg:#0B0D12;--s1:#141824;--s2:#1B2030;--pri:#8AA4FF;--onpri:#0B1030;--tx:#E6E8EF;--mut:#9AA1B5;--line:#2A3043;--green:#4ADE80;--amber:#FBBF24;--red:#FF6B6B;--grey:#8B92A8}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
-main{max-width:520px;margin:0 auto;padding:16px;display:grid;gap:16px}
-header{display:flex;align-items:baseline;justify-content:space-between}
-h1{margin:0;font-size:1.8rem}header small{color:var(--mut)}
-.tabs{display:flex;background:var(--s2);border-radius:16px;padding:4px}
-.tabs button{flex:1;border:0;border-radius:12px;padding:12px 8px;background:none;color:var(--mut);font-weight:600;font-size:.95rem;font-family:inherit;cursor:pointer}
-.tabs button.on{background:var(--pri);color:var(--onpri)}
-.card{background:var(--s1);border-radius:24px;padding:20px;display:grid;gap:16px}
-.row{display:flex;align-items:center;justify-content:space-between;gap:8px}
-h2{margin:0;font-size:1.1rem}
-.pill{display:inline-flex;align-items:center;gap:6px;border-radius:50px;padding:4px 10px;font-size:.8rem;background:#8B92A826;color:var(--grey)}
-.pill:before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
-.pill.green{background:#4ADE8026;color:var(--green)}.pill.amber{background:#FBBF2426;color:var(--amber)}.pill.red{background:#FF6B6B26;color:var(--red)}
-.pill.amber:before{animation:p 1s infinite}@keyframes p{50%{opacity:.25}}
-.code{text-align:center;font:700 4.2rem ui-monospace,Consolas,monospace;letter-spacing:.1em;color:var(--pri)}
-.code.off{color:var(--line)}
-label{font-size:.75rem;letter-spacing:.15em;color:var(--mut);text-align:center;display:block}
-input{width:100%;background:var(--s2);border:1px solid var(--line);color:var(--tx);border-radius:16px;padding:12px;text-align:center;font:700 2rem ui-monospace,Consolas,monospace;letter-spacing:.3em}
-input:focus{outline:2px solid var(--pri)}
-.btn{border:0;border-radius:16px;min-height:52px;padding:0 16px;font-weight:600;font-size:1rem;font-family:inherit;cursor:pointer;background:var(--pri);color:var(--onpri);width:100%}
-a.btn{display:flex;align-items:center;justify-content:center;text-decoration:none}
-.btn.sec{background:var(--s2);color:var(--tx)}.btn.stop{background:#5C1F24;color:#FFDAD6}.btn:disabled{opacity:.45;cursor:default}
-.msg{margin:0;text-align:center;color:var(--mut);font-size:.9rem}.warn{color:var(--amber)}
-.note{color:var(--mut);font-size:.8rem;text-align:center}
-[hidden]{display:none!important}
-#modal{position:fixed;inset:0;background:#000a;display:grid;place-items:center;padding:16px;z-index:9}
-#modal .card{max-width:380px;width:100%;background:var(--s2)}
-#toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--s2);border:1px solid var(--line);padding:10px 16px;border-radius:12px;z-index:10}
-</style>
-</head>
-<body>
-<main>
-  <header><h1>Shelyn</h1><small>web 0.1.0</small></header>
-  <div class="tabs"><button id="tG" class="on">Invitado</button><button id="tH">Host</button></div>
+// Proxy mínimo para Cloudflare Realtime (SFU + TURN). Guarda el App Secret y el TURN key FUERA del APK.
+//
+// Rutas (las mismas que usa CloudflareRealtimeClient.kt en modo proxy):
+//   GET  /ice                          -> credenciales STUN/TURN de vida corta
+//   POST /sessions/new
+//   POST /sessions/{id}/tracks/new
+//   PUT  /sessions/{id}/renegotiate
+//   PUT  /sessions/{id}/tracks/close
+//
+// Cabeceras de la app: X-Shelyn-Key (clave compartida) y X-Shelyn-Room (código de 4 cifras).
+// Las rutas /sessions/* solo funcionan si la sala existe en Firebase (el host la publica antes de usar el SFU).
+//
+// Honestidad: la clave compartida va en el APK, así que se puede extraer. Este proxy impide que se
+// use TU token de Cloudflare para otra cosa (crear apps, borrar, etc.) y te deja revocar/limitar
+// desde un único sitio. Añade Rate Limiting de Cloudflare (WAF) sobre este Worker para frenar abusos.
 
-  <section class="card" id="pG">
-    <div class="row"><h2>Invitado</h2><span id="gPill" class="pill">Desconectado</span></div>
-    <p id="invite" class="msg" hidden></p>
-    <div><label for="code">CÓDIGO DE SALA (4 CIFRAS)</label>
-    <input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="····"></div>
-    <a id="openApp" class="btn sec" hidden>Abrir en la app Shelyn</a>
-    <button id="joinBtn" class="btn" disabled>Unirse a la sala</button>
-    <button id="tap" class="btn sec" hidden>🔊 Pulsa para activar el audio</button>
-    <p id="gStats" class="note"></p>
-    <p class="note">Modo Local (Wi-Fi/Hotspot) solo está en la app Android.</p>
-  </section>
+const CF_BASE = "https://rtc.live.cloudflare.com/v1";
+const MAX_BODY = 64 * 1024; // un SDP de audio pesa ~2-4 KB
+const SESSION_ID = /^[0-9a-f]{32}$/;
 
-  <section class="card" id="pH" hidden>
-    <div class="row"><h2>Host</h2><span id="hPill" class="pill">Desconectado</span></div>
-    <div id="noHost" class="msg" hidden>Compartir audio solo funciona en navegadores de PC (Brave, Chrome, Edge). Aquí puedes unirte como invitado.</div>
-    <div id="hostUi">
-      <div><label>CÓDIGO DE SALA</label><div id="hCode" class="code off">– – – –</div></div>
-      <p id="hWarn" class="msg warn" role="alert"></p>
-      <p id="hStats" class="note"></p>
-      <button id="shareBtn" class="btn sec" hidden>Compartir enlace</button>
-      <button id="hostBtn" class="btn">Elegir pestaña y crear sala</button>
-      <p class="note">Solo se transmite el audio de la pestaña elegida; el vídeo se descarta al instante.</p>
-    </div>
-  </section>
-</main>
+const ROUTES = [
+  { method: "POST", re: /^\/sessions\/new$/ },
+  { method: "POST", re: /^\/sessions\/([0-9a-f]{32})\/tracks\/new$/ },
+  { method: "PUT", re: /^\/sessions\/([0-9a-f]{32})\/renegotiate$/ },
+  { method: "PUT", re: /^\/sessions\/([0-9a-f]{32})\/tracks\/close$/ },
+];
 
-<div id="modal" hidden><div class="card" role="dialog" aria-modal="true">
-  <h2>Un invitado quiere unirse</h2>
-  <p class="msg">¿Le dejas escuchar tu audio? Se rechazará solo en 20 s.</p>
-  <button id="yes" class="btn">Aceptar</button><button id="no" class="btn stop">Rechazar</button>
-</div></div>
-<div id="toast" hidden></div>
-<audio id="player" autoplay playsinline></audio>
-
-<script>
-'use strict';
-const C={DB:'https://shelyn-86208-default-rtdb.europe-west1.firebasedatabase.app',
- KEY:'AIzaSyCs-uCindNEB647fzhdZn2gLW52zigJwMg',                                // Firebase Web API key (no es secreta; restríngela por dominio)
- BASE:'https://elpikoso.github.io/Shelyn/',           // URL pública de esta web (para "Compartir enlace")
- STUN:'stun:stun.l.google.com:19302',BR:160000,JB:40,JBH:250,PT:10,
- TURN:{urls:[],username:'',credential:''}}  // TURN opcional: urls:['turn:HOST:443?transport=tcp','turns:HOST:443?transport=tcp']  // JB: buffer de jitter objetivo en ms (JBH: el mismo, pero con la pantalla apagada o la pestaña oculta) (menos = menos retraso, más riesgo de cortes);
-const $=id=>document.getElementById(id), a=$('player');
-const ST={IDLE:['Desconectado','grey'],CREATING:['Creando sala…','amber'],WAITING:['Esperando invitado…','amber'],APPROVAL:['Invitado pidiendo entrar','amber'],
- CONNECTING:['Conectando…','amber'],CONNECTED:['Conectado · audio en directo','green'],RECONNECTING:['Reconectando…','amber'],
- NOTFOUND:['Código inválido o sala inexistente','red'],FULL:['Sala llena','red'],FAILED:['Error de conexión','red'],ENDED:['La sala se ha cerrado','grey']};
-const LIVE=s=>!['IDLE','NOTFOUND','FULL','FAILED','ENDED'].includes(s);
-const pill=(el,s)=>{const[t,c]=ST[s]||ST.IDLE;el.textContent=t;el.className='pill '+c};
-const toast=t=>{const e=$('toast');e.textContent=t;e.hidden=false;setTimeout(()=>e.hidden=true,2500)};
-
-/* ---------- Firebase Auth anónima (REST) ---------- */
-let tok=null,exp=0;
-async function token(){
-  if(!C.KEY||C.KEY.startsWith('TU_'))return null;
-  if(tok&&Date.now()<exp-300000)return tok;
-  try{
-    const r=await fetch('https://identitytoolkit.googleapis.com/v1/accounts:signUp?key='+C.KEY,{method:'POST',headers:{'content-type':'application/json'},body:'{"returnSecureToken":true}'});
-    const j=await r.json();if(!r.ok)throw new Error(j.error&&j.error.message);
-    tok=j.idToken;exp=Date.now()+j.expiresIn*1000;
-  }catch(e){console.warn('Auth anónima falló:',e.message);tok=null}
-  return tok;
-}
-token();
-
-/* ---------- Realtime Database (REST + SSE), mismo esquema que la app Android ---------- */
-async function u(code,path='',q={}){const t=await token(),p=new URLSearchParams(q);if(t)p.set('auth',t);const s=p.toString();return `${C.DB}/salas/${code}${path}.json${s?'?'+s:''}`}
-async function free(c){try{const r=await fetch(await u(c,'',{shallow:'true'}));return r.ok?(await r.text()).trim()==='null':null}catch{return null}}
-async function putIfEmpty(c,f,o){
-  const url=await u(c,'/'+f),body=JSON.stringify(o);
-  try{const r=await fetch(url,{method:'PUT',headers:{'if-match':'null_etag'},body});return r.ok?'ok':r.status===412?'conflict':'error'}
-  catch{ // si el navegador bloquea el preflight de if-match: comprobar y escribir (no atómico)
-    try{const g=await fetch(await u(c,'/'+f,{shallow:'true'}));if(!g.ok)return'error';if((await g.text()).trim()!=='null')return'conflict';
-      return (await fetch(url,{method:'PUT',body})).ok?'ok':'error'}catch{return'error'}}
-}
-async function putRoom(c,o){try{return(await fetch(await u(c),{method:'PUT',body:JSON.stringify(o)})).ok}catch{return false}}
-async function push(c,f,o){try{await fetch(await u(c,'/'+f),{method:'POST',body:JSON.stringify(o)})}catch{}}
-async function del(c,p=''){try{await fetch(await u(c,p),{method:'DELETE',keepalive:true})}catch{}}
-function listen(c,cb,onCancel){
-  let es,dead=false;
-  const open=async()=>{
-    if(dead)return;const url=await u(c);if(dead)return;es=new EventSource(url);
-    const h=e=>{try{const o=JSON.parse(e.data);cb(o.path||'/',o.data===undefined?null:o.data)}catch{}};
-    es.addEventListener('put',h);es.addEventListener('patch',h);
-    es.addEventListener('auth_revoked',()=>{tok=null;es.close();open()});
-    es.addEventListener('cancel',()=>{es.close();onCancel()});
-  };
-  open();return()=>{dead=true;es&&es.close()};
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
 }
 
-/* ---------- Opus estéreo 160 kbps en el SDP (igual que forceOpusStereo de Android) ---------- */
-function opus(sdp){
-  const eol=sdp.includes('\r\n')?'\r\n':'\n',L=sdp.split(eol).filter(l=>!/^a=(max)?ptime:/.test(l));
-  const m=L.findIndex(l=>l.startsWith('a=rtpmap:')&&/\sopus\/48000/i.test(l));if(m<0)return sdp;
-  const pre=`a=fmtp:${L[m].slice(9).split(' ')[0]} `,i=L.findIndex(l=>l.startsWith(pre)),P=new Map();
-  if(i>=0)L[i].slice(pre.length).split(';').map(s=>s.trim()).filter(Boolean).forEach(kv=>{const k=kv.indexOf('=');k<0?P.set(kv,null):P.set(kv.slice(0,k),kv.slice(k+1))});
-  P.set('minptime','10');P.set('useinbandfec','1');P.set('stereo','1');P.set('sprop-stereo','1');P.set('maxaveragebitrate',String(C.BR));P.set('usedtx','0');
-  const line=pre+[...P].map(([k,v])=>v===null?k:`${k}=${v}`).join(';');
-  i>=0?L[i]=line:L.splice(m+1,0,line);
-  L.splice(L.findIndex(l=>l.startsWith(pre))+1,0,'a=ptime:'+C.PT);return L.join(eol);
+function safeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
 }
 
-/* ---------- Captura SOLO audio de una pestaña ---------- */
-async function capture(warn){
-  warn('');let s;
-  try{s=await navigator.mediaDevices.getDisplayMedia({video:{displaySurface:'browser'},audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:2,sampleRate:48000},preferCurrentTab:false,selfBrowserSurface:'exclude',systemAudio:'exclude'})}
-  catch(e){warn(e.name==='NotAllowedError'?'Captura cancelada.':'No se pudo capturar: '+e.message);return null}
-  const v=s.getVideoTracks()[0],surf=v&&v.getSettings().displaySurface;
-  s.getVideoTracks().forEach(t=>{t.stop();s.removeTrack(t)});
-  if(surf&&surf!=='browser'){s.getTracks().forEach(t=>t.stop());warn('Has elegido '+(surf==='monitor'?'pantalla completa':'una ventana')+'. Elige una PESTAÑA (p. ej. YouTube Music).');return null}
-  if(!s.getAudioTracks().length){s.getTracks().forEach(t=>t.stop());warn('No se comparte audio. Vuelve a intentarlo y marca «Compartir audio de la pestaña».');return null}
-  return s;
+async function roomExists(env, room) {
+  const r = await fetch(`${env.FIREBASE_DB_URL}/salas/${room}.json?shallow=true`);
+  if (!r.ok) return false;
+  return (await r.text()).trim() !== "null";
 }
 
-/* ---------- Sala WebRTC (host o invitado), misma máquina de estados que OnlineWebRtcManager ---------- */
-class Room{
-  constructor(role,code,ui){Object.assign(this,{role,code,ui,host:role==='host',gen:0,ready:false,remoteSet:false,descSeen:false,snap:false,ownAnswer:false,closed:false,state:'IDLE',pl:[],pr:[],seen:new Set(),t:{},pending:null})}
-  set(s){if(this.closed)return;this.state=s;this.ui(s)}
-  later(k,ms,f){clearTimeout(this.t[k]);this.t[k]=setTimeout(f,ms)}
-  peer(){
-    const g=++this.gen,pc=this.pc=new RTCPeerConnection({iceServers:[{urls:C.STUN},...(C.TURN.urls.length?[C.TURN]:[])]});
-    pc.onicecandidate=e=>{if(g===this.gen&&e.candidate)this.local(e.candidate)};
-    pc.oniceconnectionstatechange=()=>this.ice(g,pc.iceConnectionState);
-    pc.ontrack=e=>this.onTrack&&this.onTrack(e);return pc;
-  }
-  drop(){this.gen++;try{this.pc&&this.pc.close()}catch{}this.pc=null}
-  /* candidatos */
-  local(c){const o={sdpMid:c.sdpMid,sdpMLineIndex:c.sdpMLineIndex,sdp:c.candidate};this.ready?this.send(o):this.pl.push(o)}
-  send(o){push(this.code,this.host?'hostCandidates':'guestCandidates',o)}
-  flush(){const b=this.pl;this.pl=[];b.forEach(o=>this.send(o))}
-  cand(id,o){
-    if(!o||!o.sdp||this.seen.has(id))return;this.seen.add(id);
-    const c={candidate:o.sdp,sdpMid:o.sdpMid,sdpMLineIndex:o.sdpMLineIndex};
-    this.remoteSet?this.pc.addIceCandidate(c).catch(()=>{}):this.pr.push(c);
-  }
-  flushRemote(){this.pr.forEach(c=>this.pc.addIceCandidate(c).catch(()=>{}));this.pr=[]}
-  /* host */
-  async offer(){
-    const pc=this.peer(),tr=pc.addTransceiver(this.track,{direction:'sendonly',streams:[this.stream]});this.sender=tr.sender;
-    const o=await pc.createOffer(),d={type:'offer',sdp:opus(o.sdp)};await pc.setLocalDescription(d);return d;
-  }
-  async hostStart(){
-    this.set('CREATING');
-    for(let i=0;i<12;i++){
-      const c=1000+Math.floor(Math.random()*9000),f=await free(c);
-      if(f===null)return this.end('FAILED');if(!f)continue;
-      this.code=c;const r=await putIfEmpty(c,'offer',await this.offer());
-      if(r==='ok'){this.ready=true;this.flush();this.stop=listen(c,(p,v)=>this.onEvent(p,v),()=>this.end('FAILED'));this.onReady(c);return this.set('WAITING')}
-      if(r==='error')return this.end('FAILED');this.drop();
+export default {
+  async fetch(request, env) {
+    if (!safeEqual(request.headers.get("X-Shelyn-Key") ?? "", env.SHELYN_KEY ?? "")) {
+      return json({ errorCode: "unauthorized", errorDescription: "bad key" }, 401);
     }
-    this.end('FAILED');
-  }
-  async rearm(){ // invitado fuera / rechazado / conexión caída: oferta nueva, mismo código
-    if(this.closed)return;
-    Object.assign(this,{pending:null,descSeen:false,remoteSet:false,ready:false,pl:[],pr:[]});this.seen.clear();
-    Object.values(this.t).forEach(clearTimeout);this.drop();this.set('WAITING');
-    try{const o=await this.offer();if(await putRoom(this.code,{offer:o})){this.ready=true;this.flush()}else this.end('FAILED')}catch{this.end('FAILED')}
-  }
-  async accept(){
-    const o=this.pending;if(!o)return;this.pending=null;clearTimeout(this.t.acc);
-    try{await this.pc.setRemoteDescription(o);this.remoteSet=true;this.flushRemote();this.set('CONNECTING');this.conTimeout()}catch{this.rearm()}
-  }
-  reject(){this.pending=null;clearTimeout(this.t.acc);this.rearm()}
-  /* invitado */
-  async guestStart(){
-    this.set('CONNECTING');
-    const f=await free(this.code);                 // null = sin conexión con el servidor · true = sala vacía · false = sala existe
-    if(this.closed)return;
-    if(f===null)return this.end('FAILED');
-    if(f)return this.end('NOTFOUND');
-    this.stop=listen(this.code,(p,v)=>this.onEvent(p,v),()=>this.end('FAILED'));
-    this.later('offer',10000,()=>{if(!this.descSeen)this.end(this.snap?'NOTFOUND':'FAILED')});
-  }
-  async answer(o){
-    const pc=this.peer();await pc.setRemoteDescription(o);
-    const an=await pc.createAnswer(),d={type:'answer',sdp:opus(an.sdp)};await pc.setLocalDescription(d);
-    const r=await putIfEmpty(this.code,'answer',d);
-    if(r==='conflict')return this.end('FULL');if(r==='error')return this.end('FAILED');
-    this.ownAnswer=this.ready=this.remoteSet=true;this.flush();this.flushRemote();this.set('CONNECTING');this.conTimeout();
-  }
-  /* eventos de la sala (SSE) */
-  onEvent(p,v){
-    if(this.closed)return;const s=p.split('/').filter(Boolean);
-    if(!s.length){
-      if(v===null||typeof v!=='object'){
-        if(!this.snap){this.snap=true;if(!this.host)this.end('NOTFOUND')}else if(!this.host)this.end('ENDED');
-        return;
-      }
-      this.snap=true;for(const k in v)this.field(k,[],v[k]);
-    }else{this.snap=true;this.field(s[0],s.slice(1),v)}
-  }
-  field(f,rest,v){
-    const rd=this.host?'answer':'offer',rc=this.host?'guestCandidates':'hostCandidates';
-    if(f===rd&&!rest.length){
-      if(v&&typeof v==='object')this.desc(v);
-      else if(this.host&&this.descSeen)this.rearm();       // el invitado se fue
-    }else if(f===rc){
-      if(!rest.length){if(v&&typeof v==='object')for(const id in v)this.cand(id,v[id])}
-      else if(rest.length===1)this.cand(rest[0],v);
+    const room = request.headers.get("X-Shelyn-Room") ?? "";
+    if (!/^[1-9]\d{3}$/.test(room)) return json({ errorCode: "bad_room", errorDescription: "bad room" }, 400);
+
+    const url = new URL(request.url);
+
+    // ---- TURN / STUN ----
+    if (request.method === "GET" && url.pathname === "/ice") {
+      const r = await fetch(
+        `${CF_BASE}/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${env.TURN_KEY_TOKEN}`, "content-type": "application/json" },
+          body: JSON.stringify({ ttl: 6 * 3600 }),
+        }
+      );
+      return new Response(await r.text(), { status: r.status, headers: { "content-type": "application/json" } });
     }
-  }
-  async desc(o){
-    if(this.descSeen)return;this.descSeen=true;
-    try{
-      if(this.host){this.pending=o;this.set('APPROVAL');this.later('acc',20000,()=>this.reject())}
-      else{clearTimeout(this.t.offer);await this.answer(o)}
-    }catch(e){console.error(e);this.end('FAILED')}
-  }
-  /* ICE */
-  ice(g,s){
-    if(g!==this.gen||this.closed)return;
-    if(s==='connected'||s==='completed'){clearTimeout(this.t.dis);clearTimeout(this.t.con);this.tries=0;this.set('CONNECTED');this.bitrate();if(!this.si)this.si=setInterval(()=>this.stats(),2000)}
-    else if(s==='disconnected'){if(this.state==='CONNECTED')this.set('RECONNECTING');this.later('dis',12000,()=>this.lost())}
-    else if(s==='failed')this.lost();
-  }
-  lost(){this.host?this.rearm():this.regroup()}
-  regroup(){ // invitado: reintenta solo (hasta 6 veces) antes de rendirse
-    if(this.closed)return;if((this.tries=(this.tries||0)+1)>6)return this.end('FAILED');
-    Object.values(this.t).forEach(clearTimeout);this.stop&&this.stop();this.drop();
-    if(this.ownAnswer){del(this.code,'/answer');del(this.code,'/guestCandidates')}
-    Object.assign(this,{ready:false,remoteSet:false,descSeen:false,snap:false,ownAnswer:false,pl:[],pr:[]});this.seen.clear();
-    this.set('RECONNECTING');this.later('re',3000,()=>this.guestStart());
-  }
-  conTimeout(){const g=this.gen;this.later('con',25000,()=>{if(g===this.gen&&this.state!=='CONNECTED')this.lost()})}
-  async stats(){
-    if(!this.pc||this.state!=='CONNECTED'||!this.onStats)return;
-    try{
-      const r=await this.pc.getStats();let pair,jb;
-      r.forEach(x=>{if(x.type==='candidate-pair'&&x.nominated&&x.state==='succeeded')pair=x;
-        if(x.type==='inbound-rtp'&&x.kind==='audio'&&x.jitterBufferEmittedCount)jb=x.jitterBufferDelay/x.jitterBufferEmittedCount*1000});
-      if(!pair)return;const l=r.get(pair.localCandidateId),t=l&&l.candidateType;
-      this.onStats(`Ruta: ${t==='relay'?'relé TURN':t==='host'?'red local':'directa'} · RTT ${Math.round(pair.currentRoundTripTime*1000)} ms`+(jb!=null?` · buffer ${Math.round(jb)} ms`:''));
-    }catch{}
-  }
-  async bitrate(){
-    if(!this.host||!this.sender)return;
-    try{const p=this.sender.getParameters();if(!p.encodings||!p.encodings.length)p.encodings=[{}];p.encodings[0].maxBitrate=C.BR;await this.sender.setParameters(p)}catch{}
-  }
-  end(s){
-    if(this.closed)return;this.closed=true;Object.values(this.t).forEach(clearTimeout);clearInterval(this.si);this.stop&&this.stop();this.drop();
-    if(this.code){if(this.host)del(this.code);else if(this.ownAnswer){del(this.code,'/answer');del(this.code,'/guestCandidates')}}
-    this.state=s;this.ui(s);this.onEnd&&this.onEnd();
-  }
-}
 
-/* ---------- UI ---------- */
-let hostRoom=null,guestRoom=null,rxr=null;
-const setJb=()=>{if(rxr)try{rxr.jitterBufferTarget=document.hidden?C.JBH:C.JB}catch{}};
-document.addEventListener('visibilitychange',setJb);   // pantalla apagada / pestaña en segundo plano: más buffer = sin cortes
-const tab=h=>{$('tG').classList.toggle('on',!h);$('tH').classList.toggle('on',h);$('pG').hidden=h;$('pH').hidden=!h};
-$('tG').onclick=()=>tab(false);$('tH').onclick=()=>tab(true);
+    // ---- SFU ----
+    const route = ROUTES.find((x) => x.method === request.method && x.re.test(url.pathname));
+    if (!route) return json({ errorCode: "not_found", errorDescription: "route not allowed" }, 404);
 
-// Invitado
-const codeOk=()=>/^\d{4}$/.test($('code').value);
-$('code').oninput=e=>{e.target.value=e.target.value.replace(/\D/g,'').slice(0,4);$('joinBtn').disabled=!guestRoom&&!codeOk()};
-function silentWav(){ // desbloquea la reproducción en Safari/iOS dentro del gesto del usuario
-  const b=new Uint8Array(44+1600),d=new DataView(b.buffer),w=(o,s)=>[...s].forEach((c,i)=>d.setUint8(o+i,c.charCodeAt(0)));
-  w(0,'RIFF');d.setUint32(4,1636,true);w(8,'WAVEfmt ');d.setUint32(16,16,true);d.setUint16(20,1,true);d.setUint16(22,1,true);
-  d.setUint32(24,8000,true);d.setUint32(28,16000,true);d.setUint16(32,2,true);d.setUint16(34,16,true);w(36,'data');d.setUint32(40,1600,true);
-  return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
-}
-function media(on){ // notificación multimedia del sistema: ayuda a que el móvil no corte el audio con la pantalla apagada
-  const m=navigator.mediaSession;if(!m)return;
-  try{
-    if(on){m.metadata=new MediaMetadata({title:'Shelyn',artist:'Escuchando en directo'});m.playbackState='playing';
-      m.setActionHandler('stop',()=>guestRoom&&guestRoom.end('IDLE'))}
-    else{m.playbackState='none';m.metadata=null;m.setActionHandler('stop',null)}
-  }catch{}
-}
-const play=()=>a.play().then(()=>$('tap').hidden=true).catch(()=>$('tap').hidden=false);
-$('tap').onclick=play;
-function guestUi(s){
-  pill($('gPill'),s);const live=LIVE(s);
-  $('joinBtn').textContent=live?'Desconectar':'Unirse a la sala';$('joinBtn').className='btn'+(live?' stop':'');
-  $('joinBtn').disabled=!live&&!codeOk();$('code').disabled=live;
-  if(!live){rxr=null;media(false);$('tap').hidden=true;a.srcObject=null;$('gStats').textContent=s==='FAILED'?'No se pudo contactar con el servidor. Revisa tu conexión a Internet.':''}
-}
-$('joinBtn').onclick=()=>{
-  if(guestRoom){guestRoom.end('IDLE');return}
-  if(!codeOk())return;
-  a.src=silentWav();a.play().catch(()=>{});                 // gesto del usuario: permite el audio después
-  const r=guestRoom=new Room('guest',+$('code').value,guestUi);
-  r.onTrack=e=>{rxr=e.receiver;setJb();a.srcObject=e.streams[0]||new MediaStream([e.track]);media(true);play()};
-  r.onStats=t=>$('gStats').textContent=t;r.onEnd=()=>{guestRoom=null};r.guestStart();
-};
-// Auto-conexión por enlace: ?sala=1234  (hay que pulsar «Unirse» para que el navegador deje reproducir)
-const q=new URLSearchParams(location.search).get('sala');
-if(/^\d{4}$/.test(q||'')){$('code').value=q;$('joinBtn').disabled=false;$('invite').hidden=false;$('invite').textContent=`Te han invitado a la sala ${q}. Pulsa «Unirse a la sala» para escuchar.`;
-  if(/Android/i.test(navigator.userAgent)){ // intent:// dirigido SOLO al paquete de Shelyn (ninguna otra app puede interceptarlo)
-    const fb=encodeURIComponent('https://github.com/ElPikoso/Shelyn-Releases/releases/latest');
-    $('openApp').href=`intent://join?sala=${q}#Intent;scheme=shelyn;package=com.shelyn.app;S.browser_fallback_url=${fb};end`;$('openApp').hidden=false}}
+    if (!(await roomExists(env, room))) {
+      return json({ errorCode: "room_not_found", errorDescription: "room does not exist" }, 403);
+    }
 
-// Host
-const canHost=!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia)&&!/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-if(!canHost){$('noHost').hidden=false;$('hostUi').hidden=true}
-function hostUi(s){
-  pill($('hPill'),s);const live=LIVE(s);$('modal').hidden=s!=='APPROVAL';
-  $('hostBtn').textContent=live?'Detener y cerrar sala':'Elegir pestaña y crear sala';$('hostBtn').className='btn'+(live?' stop':'');
-  $('shareBtn').hidden=!(live&&hostRoom&&hostRoom.code);
-  if(!live){$('hStats').textContent=s==='FAILED'?'No se pudo contactar con el servidor. Revisa tu conexión a Internet.':'';$('hCode').textContent='– – – –';$('hCode').classList.add('off')}
-}
-$('hostBtn').onclick=async()=>{
-  if(hostRoom){hostRoom.end('IDLE');return}
-  const stream=await capture(w=>$('hWarn').textContent=w);if(!stream)return;
-  const r=hostRoom=new Room('host',0,hostUi);r.stream=stream;r.track=stream.getAudioTracks()[0];
-  r.onStats=t=>$('hStats').textContent=t;
-  r.onReady=c=>{$('hCode').textContent=c;$('hCode').classList.remove('off');$('shareBtn').hidden=false};
-  r.onEnd=()=>{stream.getTracks().forEach(t=>t.stop());hostRoom=null};
-  r.track.addEventListener('ended',()=>r.end('ENDED'));   // el usuario pulsó «Dejar de compartir»
-  r.hostStart();
+    const len = Number(request.headers.get("content-length") ?? "0");
+    if (len > MAX_BODY) return json({ errorCode: "too_large", errorDescription: "body too large" }, 413);
+    const body = request.method === "GET" ? undefined : await request.text();
+    if (body && body.length > MAX_BODY) return json({ errorCode: "too_large", errorDescription: "body too large" }, 413);
+
+    const upstream = await fetch(`${CF_BASE}/apps/${env.CF_APP_ID}${url.pathname}`, {
+      method: request.method,
+      headers: { Authorization: `Bearer ${env.CF_APP_SECRET}`, "content-type": "application/json" },
+      body: body || undefined,
+    });
+    return new Response(await upstream.text(), {
+      status: upstream.status,
+      headers: { "content-type": "application/json" },
+    });
+  },
 };
-$('yes').onclick=()=>hostRoom&&hostRoom.accept();$('no').onclick=()=>hostRoom&&hostRoom.reject();
-$('shareBtn').onclick=async()=>{
-  const url=C.BASE+'?sala='+hostRoom.code;
-  if(navigator.share){try{await navigator.share({title:'Shelyn',text:'Escucha conmigo en Shelyn',url});return}catch(e){if(e.name==='AbortError')return}}
-  try{await navigator.clipboard.writeText(url);toast('Enlace copiado')}catch{prompt('Copia el enlace:',url)}
-};
-addEventListener('pagehide',()=>{hostRoom&&hostRoom.end('IDLE');guestRoom&&guestRoom.end('IDLE')});
-</script>
-</body>
-</html>
