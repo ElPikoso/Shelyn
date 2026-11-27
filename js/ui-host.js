@@ -7,6 +7,7 @@ function hostUi(s){
   $('hostBtn').textContent=live?'Detener transmisión':'Elegir pestaña y crear sala';
   $('hostBtn').className='btn'+(live?' stop':'');
   $('shareBtn').hidden=!live;
+  if(!live)showPeople('hPeople',[]);
   if(!live){$('hCode').textContent='– – – –';$('hCode').className='code off'}
 }
 
