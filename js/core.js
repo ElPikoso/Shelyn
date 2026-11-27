@@ -19,5 +19,12 @@ const toast=t=>{const el=$('toast');el.textContent=t;el.hidden=false;clearTimeou
 const codeOk=()=>/^[1-9][0-9]{3}$/.test($('code').value.trim());
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
+/* Apodos y lista de conectados (textContent: un apodo nunca se interpreta como HTML) */
+const nickName=v=>String(v||'').trim().slice(0,20);
+function showPeople(id,list){
+  const el=$(id);el.hidden=!list.length;
+  el.textContent=list.length?`Conectados (${list.length}):\n${list.join('\n')}`:'';
+}
+
 /* Estado compartido entre archivos */
 let hostRoom=null,guestRoom=null,rxr=null;
