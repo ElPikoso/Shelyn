@@ -17,9 +17,21 @@ function applyNp(raw){
   if(JSON.stringify(n)===JSON.stringify(npCur))return;
   npCur=n;renderNp();if(mediaOn)mediaMeta();
 }
+// Título de la pestaña: "♪ Canción · Artista · Shelyn" mientras hay pista; al salir se restaura el original
+const NP_BASE_TITLE=document.title;let npTitleSet=false;
+function npTabTitle(){
+  const n=npCur;
+  if(npVisible&&n){
+    document.title='♪ '+n.title+(n.artist?' · '+n.artist:'')+' · Shelyn';
+    npTitleSet=true;
+  }else if(npTitleSet){
+    document.title=NP_BASE_TITLE;npTitleSet=false;
+  }
+}
 function renderNp(){
   const c=$('npCard'),n=npCur,img=$('npImg');
   c.hidden=!npVisible;
+  npTabTitle();
   $('npT').textContent=n?n.title:'Audio en directo';
   $('npA').textContent=n?(n.artist||'Audio en directo'):'Sin título de pista';
   if(n&&n.artwork){
