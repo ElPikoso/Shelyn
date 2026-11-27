@@ -79,7 +79,7 @@
 
 <div id="modal" hidden><div class="card" role="dialog" aria-modal="true">
   <h2>Un invitado quiere unirse</h2>
-  <p class="msg">¿Le dejas escuchar tu audio? Se rechazará solo en 20 s.</p>
+  <p class="msg">¿Le dejas escuchar tu audio? Se rechazará solo en 45 s.</p>
   <button id="yes" class="btn">Aceptar</button><button id="no" class="btn stop">Rechazar</button>
 </div></div>
 <div id="toast" hidden></div>
@@ -96,7 +96,9 @@ const C={
   BR:80000,
   JB:40,
   JBH:250,
-  PT:20
+  PT:20,
+  MODAL_MS:45000,   // tiempo que tiene el host para aceptar
+  CONN_MS:30000     // tiempo máximo del invitado esperando conexión
 };
 
 const $=id=>document.getElementById(id), a=$('player');
@@ -142,8 +144,13 @@ async function getIceServers(){
       const r=await fetch(`${C.SFU_PROXY}/turn`,{method:'POST'});
       if(r.ok){
         const d=await r.json();
-        if(Array.isArray(d.iceServers)&&d.iceServers.length){
-          ice.push(...d.iceServers);
+        // Cloudflare devuelve iceServers como OBJETO; el Worker puede devolver array. Aceptamos ambos.
+        const list=[].concat(d.iceServers||[]).map(s=>({
+          ...s,
+          urls:[].concat(s.urls||[]).filter(u=>!/:53(\?|$)/.test(u)) // Chrome rechaza el puerto 53
+        })).filter(s=>s.urls.length);
+        if(list.length){
+          ice.push(...list);
           cachedIce=ice;
         }
       }
@@ -163,29 +170,29 @@ async function sfuCall(path,method,body){
   return r.json();
 }
 
-/* ---------- SDP OPUS (80 kbps estéreo + FEC + ptime 20) ---------- */
+/* ---------- SDP OPUS (80 kbps estéreo + FEC + ptime 20) ----------
+   ptime se coloca DESPUÉS de fmtp (dentro de la sección de medios, nunca entre m= y c=). */
 function tuneOpus(sdp){
   const lines=sdp.split('\r\n');
-  let opusPt=null;
+  let pt=null;
   for(const l of lines){
     const m=l.match(/^a=rtpmap:(\d+)\s+opus\/48000/i);
-    if(m){opusPt=m[1];break}
+    if(m){pt=m[1];break}
   }
-  if(!opusPt)return sdp;
+  if(!pt)return sdp;
+  const fmtp=`a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=${C.BR}`;
+  const ptime=`a=ptime:${C.PT}`;
+  const base=lines.filter(l=>!l.startsWith('a=ptime:')&&!l.startsWith('a=maxptime:'));
   const out=[];
-  let hasFmtp=false;
-  for(const l of lines){
-    if(l.startsWith('a=fmtp:'+opusPt+' ')){
-      hasFmtp=true;
-      out.push(`a=fmtp:${opusPt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=${C.BR}`);
-    }else if(!l.startsWith('a=ptime:')&&!l.startsWith('a=maxptime:')){
-      out.push(l);
-      if(l.startsWith('m=audio '))out.push(`a=ptime:${C.PT}`,`a=maxptime:40`);
-    }
+  let done=false;
+  for(const l of base){
+    if(l.startsWith('a=fmtp:'+pt+' ')){
+      out.push(fmtp,ptime);done=true;
+    }else out.push(l);
   }
-  if(!hasFmtp){
-    const idx=out.findIndex(l=>l.startsWith('a=rtpmap:'+opusPt));
-    if(idx>=0)out.splice(idx+1,0,`a=fmtp:${opusPt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=${C.BR}`);
+  if(!done){
+    const idx=out.findIndex(l=>l.startsWith('a=rtpmap:'+pt+' '));
+    if(idx>=0)out.splice(idx+1,0,fmtp,ptime);
   }
   return out.join('\r\n');
 }
@@ -205,6 +212,11 @@ class Room{
     this.onTrack=null;this.onStats=null;this.onEnd=null;
     this.seen=new Set();this.timer=null;this.mode='p2p';this.sfuKey=null;
     this.activeGuestId=null;this.myUid=null;
+    this.answered=false;      // el host ya está gestionando una respuesta
+    this.backlog=null;        // candidatos recibidos antes de tener remoteDescription
+    this.pend=[];             // candidatos del host a publicar cuando la sala exista
+    this.roomReady=false;
+    this.connTimer=null;
   }
   state(s){if(!this.dead)this.onState(s)}
   async mkPc(isSfu=false){
@@ -219,6 +231,8 @@ class Room{
             sdpMLineIndex:e.candidate.sdpMLineIndex??0
           };
           if(this.role==='host'){
+            // Si la sala aún no existe, el fbPut la sobrescribiría: se guarda y se envía después.
+            if(!this.roomReady){this.pend.push(payload);return}
             fbPost(`salas/${this.code}/hostCandidates`,payload).catch(()=>{});
           }else{
             fbPost(`salas/${this.code}/guestCandidates`,payload).catch(()=>{});
@@ -242,6 +256,7 @@ class Room{
       if(this.dead)return;
       const st=pc.connectionState;
       if(st==='connected'){
+        clearTimeout(this.connTimer);
         if(this.role==='guest')$('gStats').textContent=isSfu?'Modo grupal Cloudflare SFU':'Conexión directa P2P';
         this.state(isSfu?'CONNECTED_SFU':'CONNECTED');
       }else if(st==='disconnected')this.state('RECONNECTING');
@@ -266,13 +281,24 @@ class Room{
     es.onerror=()=>{if(!this.dead&&es.readyState===EventSource.CLOSED)this.end('FAILED')};
     this.es=es;
   }
+  // Si aún no hay remoteDescription, los candidatos se guardan (sin marcarlos como vistos)
   async addCands(obj){
     if(!obj||!this.pc||this.mode==='sfu')return;
+    if(!this.pc.remoteDescription){
+      this.backlog={...(this.backlog||{}),...obj};
+      return;
+    }
     for(const [k,c] of Object.entries(obj)){
       if(this.seen.has(k)||!c||!c.sdp)continue;
-      this.seen.add(k);
-      try{await this.pc.addIceCandidate({candidate:c.sdp,sdpMid:c.sdpMid,sdpMLineIndex:c.sdpMLineIndex})}catch{}
+      try{
+        await this.pc.addIceCandidate({candidate:c.sdp,sdpMid:c.sdpMid,sdpMLineIndex:c.sdpMLineIndex});
+        this.seen.add(k);
+      }catch{}
     }
+  }
+  async flushBacklog(){
+    const b=this.backlog;this.backlog=null;
+    if(b)await this.addCands(b);
   }
   async hostStart(stream){
     this.stream=stream;
@@ -285,15 +311,18 @@ class Room{
     off.sdp=tuneOpus(off.sdp);
     await pc.setLocalDescription(off);
     await fbPut(`salas/${this.code}`,{owner:uid,offer:{type:'offer',sdp:off.sdp}});
+    // La sala ya existe: publicar los candidatos acumulados
+    this.roomReady=true;
+    for(const p of this.pend)fbPost(`salas/${this.code}/hostCandidates`,p).catch(()=>{});
+    this.pend=[];
     this.state('WAITING');
-    let answered=false;
 
     const tryHandleGuests=async(guests)=>{
       if(!guests||typeof guests!=='object')return;
       for(const [gid,g] of Object.entries(guests)){
         if(!g||typeof g!=='object')continue;
-        if(g.answer&&g.answer.sdp&&!answered){
-          answered=true;
+        if(g.answer&&g.answer.sdp&&!this.answered){
+          this.answered=true;
           this.activeGuestId=gid;
           await this.askApproval(g.answer,gid);
         }
@@ -308,18 +337,18 @@ class Room{
       if(this.pc&&this.pc.connectionState==='connected'){clearInterval(this.timer);return}
       const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
       if(!snap)return;
-      if(snap.answer&&!answered){answered=true;await this.askApproval(snap.answer,null)}
+      if(snap.answer&&!this.answered){this.answered=true;await this.askApproval(snap.answer,null)}
       if(snap.guestCandidates)await this.addCands(snap.guestCandidates);
       if(snap.guests)await tryHandleGuests(snap.guests);
     },1500);
 
     await this.listen(`salas/${this.code}`,async(p,d)=>{
       if(p==='/'&&d){
-        if(d.answer&&!answered){answered=true;await this.askApproval(d.answer,null)}
+        if(d.answer&&!this.answered){this.answered=true;await this.askApproval(d.answer,null)}
         if(d.guestCandidates)await this.addCands(d.guestCandidates);
         if(d.guests)await tryHandleGuests(d.guests);
-      }else if(p==='/answer'&&d&&!answered){
-        answered=true;await this.askApproval(d,null);
+      }else if(p==='/answer'&&d&&!this.answered){
+        this.answered=true;await this.askApproval(d,null);
       }else if(p.startsWith('/guestCandidates')){
         const snap=await fbGet(`salas/${this.code}/guestCandidates`).catch(()=>null);
         await this.addCands(snap);
@@ -341,19 +370,32 @@ class Room{
         await fbDel(`salas/${this.code}/answer`);
         await fbDel(`salas/${this.code}/guestCandidates`);
       }
+      this.backlog=null;
+      this.answered=false;   // permitir que entre otro invitado
       this.state('WAITING');
       return;
     }
     this.state('CONNECTING');
     await this.pc.setRemoteDescription({type:'answer',sdp:tuneOpus(ans.sdp)});
+    await this.flushBacklog();
     if(guestId){
       const gSnap=await fbGet(`salas/${this.code}/guests/${guestId}/candidates`).catch(()=>null);
       await this.addCands(gSnap);
     }
+    const g=await fbGet(`salas/${this.code}/guestCandidates`).catch(()=>null);
+    await this.addCands(g);
   }
   async guestStart(){
     this.state('CONNECTING');
     $('gStats').textContent='Buscando sala…';
+    // Tiempo máximo de espera: si el host no responde, no nos quedamos en "Conectando…" para siempre
+    this.connTimer=setTimeout(()=>{
+      if(this.dead)return;
+      if(!this.pc||this.pc.connectionState!=='connected'){
+        $('gStats').textContent='El anfitrión no respondió o la red bloquea la conexión.';
+        this.end('FAILED');
+      }
+    },C.CONN_MS);
     const {uid}=await getAuth();
     this.myUid=uid;
     const room=await fbGet(`salas/${this.code}`).catch(()=>null);
@@ -454,6 +496,7 @@ class Room{
     if(this.dead)return;
     this.dead=true;
     clearInterval(this.timer);
+    clearTimeout(this.connTimer);
     if(this.es)this.es.close();
     if(this.pc)this.pc.close();
     if(this.stream)this.stream.getTracks().forEach(t=>t.stop());
@@ -468,8 +511,10 @@ class Room{
 function askModal(){
   return new Promise(res=>{
     const m=$('modal');m.hidden=false;
-    const done=v=>{clearTimeout(t);m.hidden=true;$('yes').onclick=$('no').onclick=null;res(v)};
-    const t=setTimeout(()=>done(false),20000);
+    const oldTitle=document.title;
+    if(document.hidden)document.title='⚠ Invitado esperando · Shelyn';
+    const done=v=>{clearTimeout(t);m.hidden=true;document.title=oldTitle;$('yes').onclick=$('no').onclick=null;res(v)};
+    const t=setTimeout(()=>done(false),C.MODAL_MS);
     $('yes').onclick=()=>done(true);
     $('no').onclick=()=>done(false);
   });
@@ -514,7 +559,8 @@ function guestUi(s){
   $('code').disabled=live;
   if(!live){
     rxr=null;media(false);$('tap').hidden=true;a.srcObject=null;
-    if(s==='FAILED')$('gStats').textContent='No se pudo contactar con el servidor o la sala no existe.';
+    if(s==='FAILED'&&!$('gStats').textContent.startsWith('El anfitrión'))
+      $('gStats').textContent='No se pudo contactar con el servidor o la sala no existe.';
   }
 }
 
@@ -522,6 +568,7 @@ $('code').oninput=()=>{$('joinBtn').disabled=!codeOk()};
 $('joinBtn').onclick=()=>{
   if(guestRoom){guestRoom.end('IDLE');return}
   if(!codeOk())return;
+  $('gStats').textContent='';
   a.src=silentWav();a.play().catch(()=>{});
   const r=guestRoom=new Room('guest',+$('code').value.trim(),guestUi);
   r.onTrack=e=>{rxr=e.receiver;setJb();a.srcObject=e.streams[0]||new MediaStream([e.track]);media(true);play()};
