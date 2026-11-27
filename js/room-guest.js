@@ -194,6 +194,8 @@ Object.assign(Room.prototype,{
   async connectSfuGuest(sfu){
     const key=`${sfu.sessionId}:${sfu.trackName}`;
     if(this.sfuKey===key||Date.now()<this.sfuNext)return;
+    // Ya conectado por P2P: no tumbamos una conexión buena por probar el SFU
+    if(this.claimed&&this.pc&&this.pc.connectionState==='connected')return;
     this.sfuKey=key;
     this.mode='sfu';
     this.claimed=false;this.waiting=false;this.gReady=false;
@@ -201,47 +203,33 @@ Object.assign(Room.prototype,{
     if(!this.hbTimer)this.startPresence('wait');   // el host nos verá (y aprobará) por la presencia
     this.state('CONNECTING');
     $('gStats').textContent='Conectando por Cloudflare SFU…';
-    this.armConn(C.CONN_MS/2);
+    // El plazo se arma UNA sola vez: antes cada reintento lo reiniciaba y el invitado se quedaba en "Conectando…" para siempre
+    if(!this.sfuArmed){this.sfuArmed=true;this.armConn(C.CONN_MS)}
     if(this.pc){try{this.pc.close()}catch{}this.pc=null}
     try{
+      // Flujo documentado de Cloudflare para RECIBIR pistas: pedir la pista remota SIN oferta propia;
+      // Cloudflare devuelve una OFERTA, el cliente responde con una respuesta y la envía a /renegotiate.
       const ses=await sfuCall('/sessions/new','POST');
-      const guestSessionId=ses.sessionId;
-      const pc=await this.mkPc(true);
-      pc.addTransceiver('audio',{direction:'recvonly'});
-
-      const off=await pc.createOffer();
-      off.sdp=tuneOpus(off.sdp);
-      await pc.setLocalDescription(off);
-
-      const trRes=await sfuCall(`/sessions/${guestSessionId}/tracks/new`,'POST',{
-        sessionDescription:{type:'offer',sdp:off.sdp},
-        tracks:[{
-          location:'remote',
-          sessionId:sfu.sessionId,
-          trackName:sfu.trackName,
-          mid:'0'
-        }]
+      const sid=ses.sessionId;
+      if(!sid)throw new Error('SFU sin sessionId');
+      const tr=await sfuCall(`/sessions/${sid}/tracks/new`,'POST',{
+        tracks:[{location:'remote',sessionId:sfu.sessionId,trackName:sfu.trackName}]
       });
-
-      if(trRes.sessionDescription&&trRes.sessionDescription.sdp){
-        await pc.setRemoteDescription({
-          type:trRes.sessionDescription.type||'answer',
-          sdp:tuneOpus(trRes.sessionDescription.sdp)
-        });
-      }
-      if(trRes.requiresImmediateRenegotiation){
-        const ans2=await pc.createAnswer();
-        ans2.sdp=tuneOpus(ans2.sdp);
-        await pc.setLocalDescription(ans2);
-        await sfuCall(`/sessions/${guestSessionId}/renegotiate`,'PUT',{
-          sessionDescription:{type:'answer',sdp:ans2.sdp}
-        });
-      }
+      if(!tr.sessionDescription||!tr.sessionDescription.sdp)throw new Error('SFU no devolvió oferta');
+      const pc=await this.mkPc(true);
+      await pc.setRemoteDescription({type:'offer',sdp:tr.sessionDescription.sdp});
+      const ans=await pc.createAnswer();
+      ans.sdp=tuneOpus(ans.sdp);
+      await pc.setLocalDescription(ans);
+      await sfuCall(`/sessions/${sid}/renegotiate`,'PUT',{
+        sessionDescription:{type:'answer',sdp:ans.sdp}
+      });
     }catch(e){
+      console.error('[Shelyn] Error SFU invitado:',e);
       if(this.dead)return;
       this.sfuKey=null;this.sfuNext=Date.now()+4000;   // reintento en el próximo sondeo
       if(this.pc){try{this.pc.close()}catch{}this.pc=null}
-      $('gStats').textContent='Error en la sala grupal, reintentando…';
+      $('gStats').textContent='Error en la sala grupal, reintentando… ('+(e&&e.message||e)+')';
     }
   },
 });
