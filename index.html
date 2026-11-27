@@ -28,11 +28,14 @@
       <div class="npi"><div id="npT" class="npt">Audio en directo</div><div id="npA" class="npa">Sin título de pista</div></div>
       <div class="eq" aria-hidden="true"><i></i><i></i><i></i></div>
     </div>
+    <label for="nick">TU APODO</label>
+    <input id="nick" class="npf" type="text" maxlength="20" placeholder="Invitado" autocomplete="off">
     <label for="code">CÓDIGO DE SALA</label>
     <input id="code" type="text" inputmode="numeric" maxlength="4" placeholder="0000" autocomplete="off">
     <button id="tap" class="btn sec" hidden>Tocar para activar sonido</button>
     <button id="joinBtn" class="btn" disabled>Unirse a la sala</button>
     <p id="gStats" class="note"></p>
+    <p id="gPeople" class="note" style="white-space:pre-line" hidden></p>
   </section>
 
   <!-- PANEL ANFITRIÓN -->
@@ -42,6 +45,7 @@
       <div><label>CÓDIGO DE SALA</label><div id="hCode" class="code off">– – – –</div></div>
       <p id="hWarn" class="msg warn" role="alert"></p>
       <p id="hStats" class="note"></p>
+      <p id="hPeople" class="note" style="white-space:pre-line" hidden></p>
       <details class="np"><summary>En reproducción (opcional)</summary>
         <input id="npTitle" class="npf" type="text" maxlength="149" placeholder="Título" autocomplete="off">
         <input id="npArtist" class="npf" type="text" maxlength="149" placeholder="Artista" autocomplete="off">
