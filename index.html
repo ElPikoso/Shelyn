@@ -1,73 +1,379 @@
-<div id="hostUi">
-<div><label>CÓDIGO DE SALA</label><div id="hCode" class="code off">– – – –</div></div>
-<p id="hWarn" class="msg warn" role="alert"></p>
-<p id="hStats" class="note"></p>
-<button id="shareBtn" class="btn sec" hidden>Compartir enlace</button>
-<button id="hostBtn" class="btn">Elegir pestaña y crear sala</button>
-<p class="note">Solo se transmite el audio de la pestaña elegida; el vídeo se descarta al instante.</p>
-</div>
-</section>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shelyn · Audio en directo</title>
+<style>
+  :root{--bg:#0d0f14;--card:#161922;--in:#1f2430;--tx:#f1f5f9;--mut:#8b95a7;--acc:#6366f1;--acc2:#4f46e5;--red:#ef4444;--grn:#22c55e;--amb:#f59e0b}
+  *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
+  body{background:var(--bg);color:var(--tx);min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:16px}
+  main{width:100%;max-width:420px;background:var(--card);border-radius:20px;padding:24px;box-shadow:0 20px 40px rgba(0,0,0,.45)}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+  h1{font-size:1.35rem;font-weight:700;letter-spacing:-.02em}
+  .tabs{display:grid;grid-template-columns:1fr 1fr;background:var(--bg);padding:4px;border-radius:12px;margin-bottom:20px}
+  .tabs button{background:none;border:0;color:var(--mut);padding:10px;border-radius:9px;font-weight:600;font-size:.9rem;cursor:pointer;transition:.15s}
+  .tabs button.on{background:var(--in);color:var(--tx)}
+  label{display:block;font-size:.75rem;font-weight:700;letter-spacing:.06em;color:var(--mut);margin-bottom:8px;text-transform:uppercase}
+  input{width:100%;background:var(--in);border:1px solid transparent;color:var(--tx);font-size:1.6rem;font-weight:700;letter-spacing:.25em;text-align:center;padding:14px;border-radius:12px;outline:none;margin-bottom:16px}
+  input:focus{border-color:var(--acc)}
+  input:disabled{opacity:.55}
+  .code{background:var(--in);font-size:2rem;font-weight:800;letter-spacing:.2em;text-align:center;padding:16px;border-radius:12px;margin-bottom:16px;user-select:all}
+  .code.off{color:var(--mut)}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:.82rem;font-weight:600;padding:6px 12px;border-radius:99px;background:var(--in);margin-bottom:16px}
+  .pill::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--mut)}
+  .pill.green::before{background:var(--grn);box-shadow:0 0 8px var(--grn)}
+  .pill.amber::before{background:var(--amb);box-shadow:0 0 8px var(--amb)}
+  .btn{width:100%;background:var(--acc);color:#fff;border:0;padding:14px;border-radius:12px;font-size:.95rem;font-weight:600;cursor:pointer;transition:.15s;margin-bottom:10px}
+  .btn:hover:not(:disabled){background:var(--acc2)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn.sec{background:var(--in);color:var(--tx)}
+  .btn.sec:hover:not(:disabled){background:#282e3d}
+  .btn.stop{background:var(--red)}
+  .btn.stop:hover:not(:disabled){background:#dc2626}
+  .note{font-size:.8rem;color:var(--mut);line-height:1.45;margin-top:6px}
+  .msg{font-size:.88rem;line-height:1.45;margin-bottom:14px}
+  .warn{color:var(--amb)}
+  #modal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;padding:16px;z-index:20}
+  #modal[hidden]{display:none}
+  .card{background:var(--card);padding:24px;border-radius:18px;max-width:340px;width:100%;border:1px solid #262b38}
+  .card h2{font-size:1.1rem;margin-bottom:8px}
+  #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1f2430;color:#fff;padding:10px 18px;border-radius:99px;font-size:.85rem;box-shadow:0 10px 25px rgba(0,0,0,.4);z-index:30}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Shelyn</h1>
+  </header>
+
+  <div class="tabs">
+    <button id="tG" class="on" type="button">Escuchar (Invitado)</button>
+    <button id="tH" type="button">Transmitir (Host)</button>
+  </div>
+
+  <!-- PANEL INVITADO -->
+  <section id="pG">
+    <div id="gPill" class="pill grey">Desconectado</div>
+    <label for="code">CÓDIGO DE SALA</label>
+    <input id="code" type="text" inputmode="numeric" maxlength="4" placeholder="0000" autocomplete="off">
+    <button id="tap" class="btn sec" hidden>Tocar para activar sonido</button>
+    <button id="joinBtn" class="btn" disabled>Unirse a la sala</button>
+    <p id="gStats" class="note"></p>
+  </section>
+
+  <!-- PANEL ANFITRIÓN -->
+  <section id="pH" hidden>
+    <div id="hPill" class="pill grey">Desconectado</div>
+    <div id="hostUi">
+      <div><label>CÓDIGO DE SALA</label><div id="hCode" class="code off">– – – –</div></div>
+      <p id="hWarn" class="msg warn" role="alert"></p>
+      <p id="hStats" class="note"></p>
+      <button id="shareBtn" class="btn sec" hidden>Compartir enlace</button>
+      <button id="hostBtn" class="btn">Elegir pestaña y crear sala</button>
+      <p class="note">Solo se transmite el audio de la pestaña elegida; el vídeo se descarta al instante.</p>
+    </div>
+  </section>
 </main>
 
 <div id="modal" hidden><div class="card" role="dialog" aria-modal="true">
-<h2>Un invitado quiere unirse</h2>
-<p class="msg">¿Le dejas escuchar tu audio? Se rechazará solo en 20 s.</p>
-<button id="yes" class="btn">Aceptar</button><button id="no" class="btn stop">Rechazar</button>
+  <h2>Un invitado quiere unirse</h2>
+  <p class="msg">¿Le dejas escuchar tu audio? Se rechazará solo en 20 s.</p>
+  <button id="yes" class="btn">Aceptar</button><button id="no" class="btn stop">Rechazar</button>
 </div></div>
 <div id="toast" hidden></div>
 <audio id="player" autoplay playsinline></audio>
 
 <script>
 'use strict';
-const C={DB:'https://shelyn-86208-default-rtdb.europe-west1.firebasedatabase.app',
-KEY:'AIzaSyCs-uCindNEB647fzhdZn2gLW52zigJwMg',                                // Firebase Web API key (no es secreta; restríngela por dominio)
-BASE:'https://elpikoso.github.io/Shelyn/',           // URL pública de esta web (para "Compartir enlace")
- STUN:'stun:stun.l.google.com:19302',BR:160000,JB:40,PT:10,
- TURN:{urls:[],username:'',credential:''}}  // TURN opcional: urls:['turn:HOST:443?transport=tcp','turns:HOST:443?transport=tcp']  // JB: buffer de jitter objetivo en ms (menos = menos retraso, más riesgo de cortes);
- STUN:'stun:stun.l.google.com:19302',BR:160000,JB:40,JBH:250,PT:10,
- TURN:{urls:[],username:'',credential:''}}  // TURN opcional: urls:['turn:HOST:443?transport=tcp','turns:HOST:443?transport=tcp']  // JB: buffer de jitter objetivo en ms (JBH: el mismo, pero con la pantalla apagada o la pestaña oculta) (menos = menos retraso, más riesgo de cortes);
+const C={
+  DB:'https://shelyn-86208-default-rtdb.europe-west1.firebasedatabase.app',
+  KEY:'AIzaSyCs-uCindNEB647fzhdZn2gLW52zigJwMg',
+  BASE:'https://elpikoso.github.io/Shelyn/',
+  STUN:'stun:stun.l.google.com:19302',
+  BR:80000,
+  JB:40,
+  JBH:250,
+  PT:20,
+  TURN:{urls:[],username:'',credential:''}
+};
+
 const $=id=>document.getElementById(id), a=$('player');
-const ST={IDLE:['Desconectado','grey'],CREATING:['Creando sala…','amber'],WAITING:['Esperando invitado…','amber'],APPROVAL:['Invitado pidiendo entrar','amber'],
-CONNECTING:['Conectando…','amber'],CONNECTED:['Conectado · audio en directo','green'],RECONNECTING:['Reconectando…','amber'],
-@@ -287,7 +287,9 @@
+const ST={
+  IDLE:['Desconectado','grey'],
+  CREATING:['Creando sala…','amber'],
+  WAITING:['Esperando invitado…','amber'],
+  APPROVAL:['Invitado pidiendo entrar','amber'],
+  CONNECTING:['Conectando…','amber'],
+  CONNECTED:['Conectado · audio en directo','green'],
+  RECONNECTING:['Reconectando…','amber'],
+  FAILED:['Error de conexión','grey']
+};
+const LIVE=s=>s!=='IDLE'&&s!=='FAILED';
+const pill=(el,s)=>{const [t,c]=ST[s]||ST.IDLE;el.textContent=t;el.className='pill '+c};
+const toast=t=>{const el=$('toast');el.textContent=t;el.hidden=false;clearTimeout(el._t);el._t=setTimeout(()=>el.hidden=true,2600)};
+const codeOk=()=>/^[1-9][0-9]{3}$/.test($('code').value.trim());
+
+/* ---------- SDP OPUS (80 kbps estéreo + FEC + ptime 20) ---------- */
+function tuneOpus(sdp){
+  const lines=sdp.split('\r\n');
+  let opusPt=null;
+  for(const l of lines){
+    const m=l.match(/^a=rtpmap:(\d+)\s+opus\/48000/i);
+    if(m){opusPt=m[1];break}
+  }
+  if(!opusPt)return sdp;
+  const out=[];
+  let hasFmtp=false;
+  for(const l of lines){
+    if(l.startsWith('a=fmtp:'+opusPt+' ')){
+      hasFmtp=true;
+      out.push(`a=fmtp:${opusPt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=${C.BR}`);
+    }else if(!l.startsWith('a=ptime:')&&!l.startsWith('a=maxptime:')){
+      out.push(l);
+      if(l.startsWith('m=audio '))out.push(`a=ptime:${C.PT}`,`a=maxptime:40`);
+    }
+  }
+  if(!hasFmtp){
+    const idx=out.findIndex(l=>l.startsWith('a=rtpmap:'+opusPt));
+    if(idx>=0)out.splice(idx+1,0,`a=fmtp:${opusPt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=${C.BR}`);
+  }
+  return out.join('\r\n');
+}
+
+/* ---------- FIREBASE REST + SSE ---------- */
+const fbUrl=p=>`${C.DB}/${p}.json?auth=${C.KEY}`;
+async function fbGet(p){const r=await fetch(fbUrl(p));if(!r.ok)throw new Error(r.status);return r.json()}
+async function fbPut(p,d){const r=await fetch(fbUrl(p),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status)}
+async function fbPatch(p,d){const r=await fetch(fbUrl(p),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status)}
+async function fbPost(p,d){const r=await fetch(fbUrl(p),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status)}
+async function fbDel(p){await fetch(fbUrl(p),{method:'DELETE'}).catch(()=>{})}
+
+/* ---------- GESTOR WEBRTC ---------- */
+class Room{
+  constructor(role,code,onState){
+    this.role=role;this.code=code;this.onState=onState;
+    this.pc=null;this.es=null;this.stream=null;this.dead=false;
+    this.onTrack=null;this.onStats=null;this.onEnd=null;
+    this.seen=new Set();this.timer=null;
+  }
+  state(s){if(!this.dead)this.onState(s)}
+  mkPc(){
+    const ice=[{urls:C.STUN}];
+    if(C.TURN.urls&&C.TURN.urls.length)ice.push(C.TURN);
+    const pc=new RTCPeerConnection({iceServers:ice});
+    const candPath=this.role==='host'?'hostCandidates':'guestCandidates';
+    pc.onicecandidate=e=>{
+      if(e.candidate&&!this.dead){
+        fbPost(`salas/${this.code}/${candPath}`,{
+          sdp:e.candidate.candidate,
+          sdpMid:e.candidate.sdpMid||'',
+          sdpMLineIndex:e.candidate.sdpMLineIndex??0
+        }).catch(()=>{});
+      }
+    };
+    pc.onconnectionstatechange=()=>{
+      if(this.dead)return;
+      const st=pc.connectionState;
+      if(st==='connected')this.state('CONNECTED');
+      else if(st==='disconnected')this.state('RECONNECTING');
+      else if(st==='failed'||st==='closed')this.end('IDLE');
+    };
+    if(this.role==='guest'){
+      pc.ontrack=e=>{if(this.onTrack)this.onTrack(e)};
+    }
+    this.pc=pc;
+    return pc;
+  }
+  listen(path,cb){
+    const es=new EventSource(fbUrl(path));
+    const handle=ev=>{
+      if(this.dead)return;
+      try{const d=JSON.parse(ev.data);if(d&&d.data!==undefined)cb(d.path,d.data)}catch{}
+    };
+    es.addEventListener('put',handle);
+    es.addEventListener('patch',handle);
+    es.onerror=()=>{if(!this.dead&&es.readyState===EventSource.CLOSED)this.end('FAILED')};
+    this.es=es;
+  }
+  async addCands(obj){
+    if(!obj||!this.pc)return;
+    for(const [k,c] of Object.entries(obj)){
+      if(this.seen.has(k)||!c||!c.sdp)continue;
+      this.seen.add(k);
+      try{await this.pc.addIceCandidate({candidate:c.sdp,sdpMid:c.sdpMid,sdpMLineIndex:c.sdpMLineIndex})}catch{}
+    }
+  }
+  async hostStart(stream){
+    this.stream=stream;
+    stream.getAudioTracks()[0].onended=()=>this.end('IDLE');
+    this.state('CREATING');
+    const pc=this.mkPc();
+    stream.getAudioTracks().forEach(t=>pc.addTrack(t,stream));
+    const off=await pc.createOffer();
+    off.sdp=tuneOpus(off.sdp);
+    await pc.setLocalDescription(off);
+    await fbPut(`salas/${this.code}`,{offer:{type:'offer',sdp:off.sdp}});
+    this.state('WAITING');
+    let answered=false;
+    this.listen(`salas/${this.code}`,async(p,d)=>{
+      if(p==='/'&&d){
+        if(d.answer&&!answered){answered=true;await this.askApproval(d.answer)}
+        if(d.guestCandidates)await this.addCands(d.guestCandidates);
+      }else if(p==='/answer'&&d&&!answered){
+        answered=true;await this.askApproval(d);
+      }else if(p.startsWith('/guestCandidates')){
+        const snap=await fbGet(`salas/${this.code}/guestCandidates`).catch(()=>null);
+        await this.addCands(snap);
+      }
+    });
+  }
+  async askApproval(ans){
+    this.state('APPROVAL');
+    const ok=await askModal();
+    if(this.dead)return;
+    if(!ok){
+      await fbDel(`salas/${this.code}/answer`);
+      await fbDel(`salas/${this.code}/guestCandidates`);
+      this.state('WAITING');
+      return;
+    }
+    this.state('CONNECTING');
+    await this.pc.setRemoteDescription({type:'answer',sdp:tuneOpus(ans.sdp)});
+  }
+  async guestStart(){
+    this.state('CONNECTING');
+    const room=await fbGet(`salas/${this.code}`).catch(()=>null);
+    if(!room||!room.offer){this.end('FAILED');return}
+    const pc=this.mkPc();
+    pc.addTransceiver('audio',{direction:'recvonly'});
+    await pc.setRemoteDescription({type:'offer',sdp:tuneOpus(room.offer.sdp)});
+    const ans=await pc.createAnswer();
+    ans.sdp=tuneOpus(ans.sdp);
+    await pc.setLocalDescription(ans);
+    await fbPatch(`salas/${this.code}`,{answer:{type:'answer',sdp:ans.sdp}});
+    if(room.hostCandidates)await this.addCands(room.hostCandidates);
+    this.listen(`salas/${this.code}/hostCandidates`,async(p,d)=>{
+      if(p==='/')await this.addCands(d);
+      else if(d)await this.addCands({[p.slice(1)]:d});
+    });
+  }
+  end(s='IDLE'){
+    if(this.dead)return;
+    this.dead=true;
+    clearTimeout(this.timer);
+    if(this.es)this.es.close();
+    if(this.pc)this.pc.close();
+    if(this.stream)this.stream.getTracks().forEach(t=>t.stop());
+    if(this.role==='host')fbDel(`salas/${this.code}`);
+    this.onState(s);
+    if(this.onEnd)this.onEnd();
+  }
+}
+
+/* ---------- MODAL APROBACIÓN HOST ---------- */
+function askModal(){
+  return new Promise(res=>{
+    const m=$('modal');m.hidden=false;
+    const done=v=>{clearTimeout(t);m.hidden=true;$('yes').onclick=$('no').onclick=null;res(v)};
+    const t=setTimeout(()=>done(false),20000);
+    $('yes').onclick=()=>done(true);
+    $('no').onclick=()=>done(false);
+  });
 }
 
 /* ---------- UI ---------- */
-let hostRoom=null,guestRoom=null;
 let hostRoom=null,guestRoom=null,rxr=null;
 const setJb=()=>{if(rxr)try{rxr.jitterBufferTarget=document.hidden?C.JBH:C.JB}catch{}};
-document.addEventListener('visibilitychange',setJb);   // pantalla apagada / pestaña en segundo plano: más buffer = sin cortes
+document.addEventListener('visibilitychange',setJb);
+
 const tab=h=>{$('tG').classList.toggle('on',!h);$('tH').classList.toggle('on',h);$('pG').hidden=h;$('pH').hidden=!h};
 $('tG').onclick=()=>tab(false);$('tH').onclick=()=>tab(true);
 
-@@ -300,20 +302,28 @@
-d.setUint32(24,8000,true);d.setUint32(28,16000,true);d.setUint16(32,2,true);d.setUint16(34,16,true);w(36,'data');d.setUint32(40,1600,true);
-return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
+function silentWav(){
+  const b=new ArrayBuffer(1644),d=new DataView(b),w=(o,s)=>{for(let i=0;i<s.length;i++)d.setUint8(o+i,s.charCodeAt(i))};
+  w(0,'RIFF');d.setUint32(4,1636,true);w(8,'WAVEfmt ');d.setUint32(16,16,true);d.setUint16(20,1,true);d.setUint16(22,1,true);
+  d.setUint32(24,8000,true);d.setUint32(28,16000,true);d.setUint16(32,2,true);d.setUint16(34,16,true);w(36,'data');d.setUint32(40,1600,true);
+  return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
 }
-function media(on){ // notificación multimedia del sistema: ayuda a que el móvil no corte el audio con la pantalla apagada
+
+function media(on){
   const m=navigator.mediaSession;if(!m)return;
   try{
-    if(on){m.metadata=new MediaMetadata({title:'Shelyn',artist:'Escuchando en directo'});m.playbackState='playing';
-      m.setActionHandler('stop',()=>guestRoom&&guestRoom.end('IDLE'))}
-    else{m.playbackState='none';m.metadata=null;m.setActionHandler('stop',null)}
+    if(on){
+      m.metadata=new MediaMetadata({title:'Shelyn',artist:'Escuchando en directo'});
+      m.playbackState='playing';
+      m.setActionHandler('stop',()=>guestRoom&&guestRoom.end('IDLE'));
+    }else{
+      m.playbackState='none';m.metadata=null;m.setActionHandler('stop',null);
+    }
   }catch{}
 }
+
 const play=()=>a.play().then(()=>$('tap').hidden=true).catch(()=>$('tap').hidden=false);
 $('tap').onclick=play;
+
 function guestUi(s){
-pill($('gPill'),s);const live=LIVE(s);
-$('joinBtn').textContent=live?'Desconectar':'Unirse a la sala';$('joinBtn').className='btn'+(live?' stop':'');
-$('joinBtn').disabled=!live&&!codeOk();$('code').disabled=live;
-  if(!live){$('tap').hidden=true;a.srcObject=null;$('gStats').textContent=s==='FAILED'?'No se pudo contactar con el servidor. Revisa tu conexión a Internet.':''}
-  if(!live){rxr=null;media(false);$('tap').hidden=true;a.srcObject=null;$('gStats').textContent=s==='FAILED'?'No se pudo contactar con el servidor. Revisa tu conexión a Internet.':''}
+  pill($('gPill'),s);const live=LIVE(s);
+  $('joinBtn').textContent=live?'Desconectar':'Unirse a la sala';
+  $('joinBtn').className='btn'+(live?' stop':'');
+  $('joinBtn').disabled=!live&&!codeOk();
+  $('code').disabled=live;
+  if(!live){
+    rxr=null;media(false);$('tap').hidden=true;a.srcObject=null;
+    $('gStats').textContent=s==='FAILED'?'No se pudo contactar con el servidor o la sala no existe.':'';
+  }
 }
+
+$('code').oninput=()=>{$('joinBtn').disabled=!codeOk()};
 $('joinBtn').onclick=()=>{
-if(guestRoom){guestRoom.end('IDLE');return}
-if(!codeOk())return;
-a.src=silentWav();a.play().catch(()=>{});                 // gesto del usuario: permite el audio después
-const r=guestRoom=new Room('guest',+$('code').value,guestUi);
-  r.onTrack=e=>{try{e.receiver.jitterBufferTarget=C.JB}catch{}a.srcObject=e.streams[0]||new MediaStream([e.track]);play()};
+  if(guestRoom){guestRoom.end('IDLE');return}
+  if(!codeOk())return;
+  a.src=silentWav();a.play().catch(()=>{});
+  const r=guestRoom=new Room('guest',+$('code').value.trim(),guestUi);
   r.onTrack=e=>{rxr=e.receiver;setJb();a.srcObject=e.streams[0]||new MediaStream([e.track]);media(true);play()};
-r.onStats=t=>$('gStats').textContent=t;r.onEnd=()=>{guestRoom=null};r.guestStart();
+  r.onEnd=()=>{guestRoom=null};
+  r.guestStart();
 };
-// Auto-conexión por enlace: ?sala=1234  (hay que pulsar «Unirse» para que el navegador deje reproducir)
+
+/* ---------- CONTROLES HOST ---------- */
+function hostUi(s){
+  pill($('hPill'),s);const live=LIVE(s);
+  $('hostBtn').textContent=live?'Detener transmisión':'Elegir pestaña y crear sala';
+  $('hostBtn').className='btn'+(live?' stop':'');
+  $('shareBtn').hidden=!live;
+  if(!live){$('hCode').textContent='– – – –';$('hCode').className='code off';$('hWarn').textContent=''}
+}
+
+$('shareBtn').onclick=async()=>{
+  if(!hostRoom)return;
+  const url=`${C.BASE}?sala=${hostRoom.code}`;
+  if(navigator.share)try{await navigator.share({title:'Shelyn',text:'Escucha mi audio en directo',url});return}catch{}
+  await navigator.clipboard.writeText(url);toast('Enlace copiado');
+};
+
+$('hostBtn').onclick=async()=>{
+  if(hostRoom){hostRoom.end('IDLE');return}
+  $('hWarn').textContent='';
+  try{
+    const stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+    stream.getVideoTracks().forEach(t=>t.stop());
+    if(!stream.getAudioTracks().length){$('hWarn').textContent='No marcaste "Compartir audio de la pestaña".';return}
+    const code=Math.floor(1000+Math.random()*9000);
+    $('hCode').textContent=code;$('hCode').className='code';
+    const r=hostRoom=new Room('host',code,hostUi);
+    r.onEnd=()=>{hostRoom=null};
+    await r.hostStart(stream);
+  }catch(e){
+    $('hWarn').textContent='Permiso cancelado o navegador no compatible.';
+    hostUi('IDLE');
+  }
+};
+
+// Auto-rellenar código desde ?sala=1234
+const q=new URLSearchParams(location.search).get('sala');
+if(q&&/^[1-9][0-9]{3}$/.test(q)){$('code').value=q;$('joinBtn').disabled=false}
+</script>
+</body>
+</html>
