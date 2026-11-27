@@ -90,7 +90,7 @@ Object.assign(Room.prototype,{
       const ans=await pc.createAnswer();
       ans.sdp=tuneOpus(ans.sdp);
       await pc.setLocalDescription(ans);
-      const res=await fbPutIfEmpty(`salas/${this.code}/answer`,{type:'answer',sdp:ans.sdp});
+      const res=await fbPutIfEmpty(`salas/${this.code}/answer`,{type:'answer',sdp:ans.sdp,by:this.myUid});
       if(this.dead)return;
       if(res==='ok'){
         this.claimed=true;this.waiting=false;clearTimeout(this.waitTimer);
