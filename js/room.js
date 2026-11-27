@@ -14,10 +14,12 @@ class Room{
     this.pend=[];             // candidatos del host a publicar cuando la sala exista
     this.roomReady=false;
     this.connTimer=null;this.ticking=false;
-    this.npEs=null;this.npTimer=null;this.npRetry=null;this.npRaw=null; // nowPlaying (invitado)
+    this.roomSeen=false;this.gen=null;this.lastHb=0;this.hbSeen=false;this.watchTimer=null;this.watching=false;
+    this.pcLostAt=0;this.away=false;this.rejoining=false;
+    this.esRetry=null;this.npEs=null;this.npTimer=null;this.npRetry=null;this.npRaw=null; // nowPlaying (invitado)
     // --- host multi-invitado ---
     this.gmap={};             // id -> {via,hb,seen,status:'new'|'queued'|'ok'}
-    this.denied=new Set();    // invitados rechazados por el host
+    this.denied=new Set();this.trusted=new Set();    // invitados rechazados por el host
     this.queue=[];this.asking=false;
     this.p2pOk=false;         // el invitado P2P ya fue aceptado
     this.sfuPc=null;this.sfuActive=false;this.sfuBusy=false;this.sfuFailAt=0;
@@ -80,6 +82,7 @@ class Room{
         if(!p2pHostInSfu)this.state('RECONNECTING');
       }else if(st==='failed'||st==='closed'){
         if(p2pHostInSfu){try{pc.close()}catch{}if(this.pc===pc)this.pc=null}
+        else if(this.role==='guest'&&this.roomSeen&&!this.dead)this.audioLost(pc);   // el host puede volver: no cerramos
         else this.end('IDLE');
       }
     };
@@ -89,18 +92,35 @@ class Room{
     if(hostSfu)this.sfuPc=pc;else this.pc=pc;
     return pc;
   }
+  // SSE reconectable: si el token caduca (auth_revoked) o se corta la conexión, se reabre con un token nuevo
   async listen(path,cb){
-    const {token}=await getAuth();
-    if(this.dead)return;
-    const es=new EventSource(fbUrl(path,token));
-    const handle=ev=>{
+    let fails=0;
+    const open=async()=>{
       if(this.dead)return;
-      try{const d=JSON.parse(ev.data);if(d&&d.data!==undefined)cb(d.path,d.data)}catch{}
+      let token;
+      try{({token}=await getAuth())}catch{
+        if(++fails>6){this.end('FAILED');return}
+        this.esRetry=setTimeout(open,2000);return;
+      }
+      if(this.dead)return;
+      if(this.es)this.es.close();
+      const es=new EventSource(fbUrl(path,token));
+      this.es=es;
+      const handle=ev=>{
+        if(this.dead)return;
+        fails=0;
+        try{const d=JSON.parse(ev.data);if(d&&d.data!==undefined)cb(d.path,d.data)}catch{}
+      };
+      es.addEventListener('put',handle);
+      es.addEventListener('patch',handle);
+      es.addEventListener('auth_revoked',()=>{es.close();if(!this.dead)this.esRetry=setTimeout(open,300)});
+      es.onerror=()=>{
+        if(this.dead||es.readyState!==EventSource.CLOSED)return;
+        if(++fails>6)this.end('FAILED');
+        else this.esRetry=setTimeout(open,2000);
+      };
     };
-    es.addEventListener('put',handle);
-    es.addEventListener('patch',handle);
-    es.onerror=()=>{if(!this.dead&&es.readyState===EventSource.CLOSED)this.end('FAILED')};
-    this.es=es;
+    await open();
   }
   // Si aún no hay remoteDescription, los candidatos se guardan (sin marcarlos como vistos)
   async addCands(obj){
@@ -126,7 +146,7 @@ class Room{
     this.dead=true;
     clearInterval(this.timer);
     clearInterval(this.hbTimer);
-    clearTimeout(this.connTimer);clearTimeout(this.waitTimer);
+    clearTimeout(this.connTimer);clearTimeout(this.waitTimer);clearTimeout(this.esRetry);clearInterval(this.watchTimer);
     if(this.es)this.es.close();
     clearInterval(this.npTimer);clearTimeout(this.npRetry);
     if(this.npEs)this.npEs.close();

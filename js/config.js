@@ -14,5 +14,9 @@ const C={
   WAIT_MS:120000,   // tiempo máximo de un invitado en cola esperando la sala grupal
   HB_MS:15000,      // latido de presencia del invitado
   STALE_MS:45000,   // invitado sin latido => se da por ido
+  HOST_HB_MS:10000, // latido del host en la sala (salas/{código}/hb)
+  HOST_LOST_MS:30000,   // el invitado da al host por desconectado tras este tiempo sin latido
+  HOST_GRACE_MS:180000, // plazo para que el host vuelva; pasado esto la sala se cierra sola
+  ROOM_STALE_MS:180000, // sala sin latido del host durante este tiempo => colgada (se puede limpiar)
   SFU_TRACK:'shelyn-audio'
 };

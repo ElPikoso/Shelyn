@@ -5,6 +5,7 @@ Object.assign(Room.prototype,{
   /* ================= HOST ================= */
   async hostStart(stream){
     this.stream=stream;
+    this.restore();
     stream.getAudioTracks()[0].onended=()=>this.end('IDLE');
     this.state('CREATING');
     const {uid}=await getAuth();
@@ -14,12 +15,14 @@ Object.assign(Room.prototype,{
     off.sdp=tuneOpus(off.sdp);
     await pc.setLocalDescription(off);
     await boostSender(pc);
-    await fbPut(`salas/${this.code}`,{owner:uid,offer:{type:'offer',sdp:off.sdp}});
+    await fbPut(`salas/${this.code}`,{owner:uid,gen:Date.now()+'-'+Math.random().toString(36).slice(2,6),hb:{'.sv':'timestamp'},offer:{type:'offer',sdp:off.sdp}});
     // La sala ya existe: publicar los candidatos acumulados
     this.roomReady=true;
     for(const p of this.pend)fbPost(`salas/${this.code}/hostCandidates`,p).catch(()=>{});
     this.pend=[];
     this.state('WAITING');
+    // Latido del host: permite detectar y limpiar salas colgadas (pestaña cerrada sin desconectar)
+    this.hbTimer=setInterval(()=>this.hostBeat(),C.HOST_HB_MS);
 
     // Sondeo de respaldo (el SSE puede perder eventos): respuestas, candidatos y presencia de invitados
     this.timer=setInterval(()=>{this.hostTick().catch(()=>{})},2000);
@@ -37,6 +40,21 @@ Object.assign(Room.prototype,{
         }
       }catch{}
     });
+  },
+  // Invitados aceptados y expulsados sobreviven a una recarga del host (misma pestaña y mismo código):
+  // al volver, los que ya estaban dentro entran sin pedir permiso otra vez y los expulsados siguen fuera.
+  restore(){
+    try{
+      const s=JSON.parse(sessionStorage.getItem('shelyn_hs_'+this.code)||'null');
+      if(s){this.trusted=new Set(s.t||[]);this.denied=new Set(s.d||[])}
+    }catch{}
+  },
+  persist(){
+    try{sessionStorage.setItem('shelyn_hs_'+this.code,JSON.stringify({t:[...this.trusted],d:[...this.denied]}))}catch{}
+  },
+  hostBeat(){
+    if(this.dead||!this.roomReady)return;
+    fbPut(`salas/${this.code}/hb`,{'.sv':'timestamp'}).catch(()=>{});
   },
   async hostTick(){
     if(this.dead||this.ticking)return;
@@ -69,7 +87,7 @@ Object.assign(Room.prototype,{
       if(!g||typeof g!=='object')continue;
       if(this.denied.has(id)){fbDel(`salas/${this.code}/guests/${id}`);continue}
       let e=this.gmap[id];
-      if(!e)e=this.gmap[id]={status:'new',via:'wait',hb:null,seen:now};
+      if(!e)e=this.gmap[id]={status:this.trusted.has(id)?'ok':'new',via:'wait',hb:null,seen:now};
       if(e.hb!==g.hb){e.hb=g.hb;e.seen=now}
       if(typeof g.via==='string')e.via=g.via;
       e.name=nickName(g.name);
@@ -93,6 +111,8 @@ Object.assign(Room.prototype,{
     if(wantSfu&&!this.sfuActive&&!this.sfuBusy&&C.SFU_PROXY&&Date.now()>this.sfuFailAt)this.hostStartSfu();
     // Todos migraron al SFU: cerramos el P2P y limpiamos su señalización
     if(this.sfuActive&&this.pc&&!Object.values(this.gmap).some(e=>e.via==='p2p'))this.hostDropP2p();
+    for(const [id,e] of Object.entries(this.gmap))if(e.status==='ok')this.trusted.add(id);
+    this.persist();
     showPeople('hPeople',Object.entries(this.gmap)
       .map(([id,e])=>({id,label:(e.name||'Invitado')+(e.status==='ok'?'':' · pendiente')}))
       .sort((x,y)=>x.label.localeCompare(y.label)),id=>this.kick(id));
@@ -124,7 +144,7 @@ Object.assign(Room.prototype,{
   async handleP2pAnswer(ans){
     this.state('APPROVAL');
     const who=ans.by?await fbGet(`salas/${this.code}/guests/${ans.by}/name`).catch(()=>null):null;
-    const ok=await askModal(who);
+    const ok=(ans.by&&this.trusted.has(ans.by))?true:await askModal(who);
     if(this.dead)return;
     if(!ok||!this.pc){
       await fbDel(`salas/${this.code}/answer`);
@@ -154,7 +174,7 @@ Object.assign(Room.prototype,{
     if(!e)return;           // se fue mientras decidías
     if(ok){e.status='ok'}
     else{
-      this.denied.add(id);delete this.gmap[id];
+      this.denied.add(id);this.trusted.delete(id);delete this.gmap[id];
       await fbDel(`salas/${this.code}/guests/${id}`);
     }
     this.hostEvaluate();
@@ -197,7 +217,7 @@ Object.assign(Room.prototype,{
   async kick(id){
     const e=this.gmap[id];
     if(!e||this.dead)return;
-    this.denied.add(id);delete this.gmap[id];
+    this.denied.add(id);this.trusted.delete(id);delete this.gmap[id];
     // Ocupaba la conexión directa y no hay sala grupal: se corta y se ofrece una nueva
     if(e.via==='p2p'&&!this.sfuActive){
       try{await this.hostRearm()}catch{this.end('FAILED');return}

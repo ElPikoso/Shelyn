@@ -40,6 +40,71 @@ Object.assign(Room.prototype,{
       fbGet(`salas/${this.code}/nowPlaying`).then(v=>{if(!this.dead){this.npRaw=v;applyNp(v)}}).catch(()=>{});
     },20000);
   },
+  // La conexión de audio cayó pero la sala sigue: se espera al host en vez de cerrar
+  audioLost(pc){
+    if(this.dead)return;
+    try{pc.close()}catch{}
+    if(this.pc===pc)this.pc=null;
+    this.pcLostAt=Date.now();
+    this.state('RECONNECTING');
+    $('gStats').textContent='Conexión de audio perdida. Reintentando…';
+  },
+  // Vigilante del host: sin latido => "desconectado" y cuenta atrás; pasado el plazo, la sala se cierra sola
+  async watch(){
+    if(this.dead||!this.roomSeen||!this.hbSeen||this.watching||this.rejoining)return;
+    this.watching=true;
+    try{
+      const now=Date.now(),silent=now-this.lastHb;
+      if(silent>=C.HOST_GRACE_MS){
+        $('gStats').textContent='El anfitrión no volvió: sala cerrada.';
+        fbDel(`salas/${this.code}`);   // solo surte efecto si las reglas permiten limpiar salas caducadas
+        this.end('FAILED');return;
+      }
+      if(silent>=C.HOST_LOST_MS){
+        if(!this.away){this.away=true;this.state('RECONNECTING')}
+        $('gStats').textContent=`Anfitrión desconectado. Esperando a que vuelva… (${Math.ceil((C.HOST_GRACE_MS-silent)/1000)} s)`;
+        // por si se perdió el aviso de sala nueva
+        const g=await fbGet(`salas/${this.code}/gen`).catch(()=>null);
+        if(g&&this.gen&&g!==this.gen&&!this.dead){
+          const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
+          if(snap&&snap.gen===g)await this.rejoin(snap);
+        }
+        return;
+      }
+      if(this.away){
+        this.away=false;
+        if(this.pc&&this.pc.connectionState==='connected')this.state(this.mode==='sfu'?'CONNECTED_SFU':'CONNECTED');
+      }
+      if(this.pcLostAt&&now-this.pcLostAt>3000){
+        if(this.mode==='sfu'){          // el host sigue ahí: pedir de nuevo la pista
+          this.pcLostAt=0;this.sfuKey=null;this.sfuNext=0;
+          const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
+          if(snap&&snap.sfu&&snap.sfu.sessionId)await this.connectSfuGuest(snap.sfu);
+        }else if(now-this.pcLostAt>20000){   // P2P caído con el host vivo: no se puede recuperar solo
+          $('gStats').textContent='Se perdió la conexión directa con el anfitrión.';
+          this.end('FAILED');
+        }
+      }
+    }finally{this.watching=false}
+  },
+  // El host volvió con una sala nueva (otro "gen"): volver a conectar desde cero
+  async rejoin(room){
+    if(this.dead||this.rejoining)return;
+    this.rejoining=true;
+    try{
+      this.gen=room.gen;this.lastHb=Date.now();this.hbSeen=!!room.hb;this.away=false;this.pcLostAt=0;
+      if(this.pc){try{this.pc.close()}catch{}this.pc=null}
+      this.sfuKey=null;this.sfuArmed=false;this.sfuNext=0;
+      this.claimed=false;this.waiting=false;this.gReady=false;this.pendG=[];this.mySdp=null;
+      this.seen=new Set();this.backlog=null;this.mode='p2p';
+      this.state('CONNECTING');
+      $('gStats').textContent='El anfitrión ha vuelto. Reconectando…';
+      this.armConn(C.CONN_MS);
+      this.writePresence();
+      if(room.sfu&&room.sfu.sessionId&&room.sfu.trackName)await this.connectSfuGuest(room.sfu);
+      else if(room.offer)await this.tryJoinP2p(room);
+    }finally{this.rejoining=false}
+  },
   armConn(ms){
     clearTimeout(this.connTimer);
     this.connTimer=setTimeout(()=>{
@@ -66,7 +131,7 @@ Object.assign(Room.prototype,{
   setVia(v){this.via=v;this.writePresence()},
   // Si el host nos borra de guests/ (rechazo/expulsión), salimos
   async checkPresence(guests){
-    if(!this.presenceOk||this.dead)return;
+    if(!this.presenceOk||this.dead||this.rejoining||this.away)return;
     if(guests===undefined){
       try{guests=await fbGet(`salas/${this.code}/guests`)}catch{return}
       if(this.dead)return;
@@ -76,6 +141,14 @@ Object.assign(Room.prototype,{
     const me=guests?guests[this.myUid]:null;
     if(me){this.miss=0;return}
     if(++this.miss>=2){
+      // ¿el host volvió con una sala nueva? (la presencia se borró al recrearla): reconectar, no expulsar
+      const g=await fbGet(`salas/${this.code}/gen`).catch(()=>null);
+      if(g&&this.gen&&g!==this.gen){
+        this.miss=0;
+        const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
+        if(snap&&!this.dead)await this.rejoin(snap);
+        return;
+      }
       $('gStats').textContent='El anfitrión rechazó tu entrada.';
       this.end('FAILED');
     }
@@ -137,6 +210,7 @@ Object.assign(Room.prototype,{
       if(this.pc&&this.pc.connectionState==='connected'){await this.checkPresence();return}
       const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
       if(!snap||this.dead)return;
+      if(snap.gen&&this.gen&&snap.gen!==this.gen){await this.rejoin(snap);return}
       if(snap.nowPlaying)applyNp(snap.nowPlaying);
       if(snap.sfu&&snap.sfu.sessionId&&snap.sfu.trackName){
         await this.connectSfuGuest(snap.sfu);
@@ -163,6 +237,12 @@ Object.assign(Room.prototype,{
     this.startNp();
     const room=await fbGet(`salas/${this.code}`).catch(()=>null);
     if(!room||(!room.offer&&!room.sfu)){this.end('FAILED');return}
+    if(room.hb&&Date.now()-room.hb>C.ROOM_STALE_MS){
+      $('gStats').textContent='El anfitrión no está activo (sala caducada).';
+      this.end('FAILED');return;
+    }
+    this.roomSeen=true;this.gen=room.gen||null;this.hbSeen=!!room.hb;this.lastHb=Date.now();
+    this.watchTimer=setInterval(()=>this.watch().catch(()=>{}),3000);
     if(room.nowPlaying)applyNp(room.nowPlaying);
 
     if(room.sfu&&room.sfu.sessionId&&room.sfu.trackName){
@@ -177,12 +257,19 @@ Object.assign(Room.prototype,{
       if(this.dead)return;
       try{
         if(p==='/'&&d){
+          if(d.hb){this.lastHb=Date.now();this.hbSeen=true}
+          if(d.gen&&this.gen&&d.gen!==this.gen){await this.rejoin(d);return}   // el host volvió con una sala nueva
           if(d.nowPlaying)applyNp(d.nowPlaying);
           if(d.sfu&&d.sfu.sessionId&&d.sfu.trackName){
             await this.connectSfuGuest(d.sfu);
             if(this.mode==='sfu')return;
           }
           if(this.claimed&&d.hostCandidates)await this.addCands(d.hostCandidates);
+        }else if(p==='/'&&d===null){   // el host cerró la sala a propósito
+          $('gStats').textContent='El anfitrión cerró la sala.';
+          this.end('IDLE');
+        }else if(p==='/hb'){
+          this.lastHb=Date.now();this.hbSeen=true;
         }else if(p==='/nowPlaying'&&d&&typeof d==='object'){
           applyNp(d);
         }else if(p==='/sfu'&&d&&d.sessionId&&d.trackName){
