@@ -196,12 +196,14 @@ async function fbPost(p,d){const {token}=await getAuth();const r=await fetch(fbU
 async function fbDel(p){try{const {token}=await getAuth();await fetch(fbUrl(p,token),{method:'DELETE'})}catch{}}
 
 /* ---------- GESTOR WEBRTC (P2P + SFU) ---------- */
+/* ---------- GESTOR WEBRTC (P2P + SFU + COMPATIBLE APP ANDROID) ---------- */
 class Room{
   constructor(role,code,onState){
     this.role=role;this.code=code;this.onState=onState;
     this.pc=null;this.es=null;this.stream=null;this.dead=false;
     this.onTrack=null;this.onStats=null;this.onEnd=null;
     this.seen=new Set();this.timer=null;this.mode='p2p';this.sfuKey=null;
+    this.activeGuestId=null;
   }
   state(s){if(!this.dead)this.onState(s)}
   async mkPc(isSfu=false){
@@ -266,30 +268,59 @@ class Room{
     await fbPut(`salas/${this.code}`,{owner:uid,offer:{type:'offer',sdp:off.sdp}});
     this.state('WAITING');
     let answered=false;
+
+    const tryHandleGuests=async(guests)=>{
+      if(!guests||typeof guests!=='object')return;
+      for(const [gid,g] of Object.entries(guests)){
+        if(!g||typeof g!=='object')continue;
+        if(g.answer&&g.answer.sdp&&!answered){
+          answered=true;
+          this.activeGuestId=gid;
+          await this.askApproval(g.answer,gid);
+        }
+        if(this.activeGuestId===gid&&g.candidates){
+          await this.addCands(g.candidates);
+        }
+      }
+    };
+
     await this.listen(`salas/${this.code}`,async(p,d)=>{
       if(p==='/'&&d){
-        if(d.answer&&!answered){answered=true;await this.askApproval(d.answer)}
+        if(d.answer&&!answered){answered=true;await this.askApproval(d.answer,null)}
         if(d.guestCandidates)await this.addCands(d.guestCandidates);
+        if(d.guests)await tryHandleGuests(d.guests);
       }else if(p==='/answer'&&d&&!answered){
-        answered=true;await this.askApproval(d);
+        answered=true;await this.askApproval(d,null);
       }else if(p.startsWith('/guestCandidates')){
         const snap=await fbGet(`salas/${this.code}/guestCandidates`).catch(()=>null);
         await this.addCands(snap);
+      }else if(p.startsWith('/guests')){
+        const snap=await fbGet(`salas/${this.code}/guests`).catch(()=>null);
+        await tryHandleGuests(snap);
       }
     });
   }
-  async askApproval(ans){
+  async askApproval(ans,guestId){
     this.state('APPROVAL');
     const ok=await askModal();
     if(this.dead)return;
     if(!ok){
-      await fbDel(`salas/${this.code}/answer`);
-      await fbDel(`salas/${this.code}/guestCandidates`);
+      if(guestId){
+        await fbDel(`salas/${this.code}/guests/${guestId}`);
+        this.activeGuestId=null;
+      }else{
+        await fbDel(`salas/${this.code}/answer`);
+        await fbDel(`salas/${this.code}/guestCandidates`);
+      }
       this.state('WAITING');
       return;
     }
     this.state('CONNECTING');
     await this.pc.setRemoteDescription({type:'answer',sdp:tuneOpus(ans.sdp)});
+    if(guestId){
+      const gSnap=await fbGet(`salas/${this.code}/guests/${guestId}/candidates`).catch(()=>null);
+      await this.addCands(gSnap);
+    }
   }
   async guestStart(){
     this.state('CONNECTING');
@@ -381,7 +412,6 @@ class Room{
     if(this.onEnd)this.onEnd();
   }
 }
-
 /* ---------- MODAL APROBACIÓN HOST ---------- */
 function askModal(){
   return new Promise(res=>{
