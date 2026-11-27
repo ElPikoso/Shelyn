@@ -129,7 +129,11 @@ const C={
   PT:10,           // ptime (ms)
   MAXPT:20,        // maxptime (ms)
   MODAL_MS:45000,   // tiempo que tiene el host para aceptar
-  CONN_MS:30000     // tiempo máximo del invitado esperando conexión
+  CONN_MS:60000,    // tiempo máximo del invitado esperando conexión (incluye la aprobación del host)
+  WAIT_MS:120000,   // tiempo máximo de un invitado en cola esperando la sala grupal
+  HB_MS:15000,      // latido de presencia del invitado
+  STALE_MS:45000,   // invitado sin latido => se da por ido
+  SFU_TRACK:'shelyn-audio'
 };
 
 const $=id=>document.getElementById(id), a=$('player');
@@ -148,6 +152,7 @@ const LIVE=s=>s!=='IDLE'&&s!=='FAILED';
 const pill=(el,s)=>{const [t,c]=ST[s]||ST.IDLE;el.textContent=t;el.className='pill '+c};
 const toast=t=>{const el=$('toast');el.textContent=t;el.hidden=false;clearTimeout(el._t);el._t=setTimeout(()=>el.hidden=true,2600)};
 const codeOk=()=>/^[1-9][0-9]{3}$/.test($('code').value.trim());
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
 /* ---------- FIREBASE ANONYMOUS AUTH (JWT REAL) ---------- */
 let authState={token:null,uid:null,exp:0,refresh:null},authBusy=null;
@@ -271,6 +276,24 @@ async function fbPut(p,d){const {token}=await getAuth();const r=await fetch(fbUr
 async function fbPatch(p,d){const {token}=await getAuth();const r=await fetch(fbUrl(p,token),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error('FB PATCH '+r.status)}
 async function fbPost(p,d){const {token}=await getAuth();const r=await fetch(fbUrl(p,token),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error('FB POST '+r.status)}
 async function fbDel(p){try{const {token}=await getAuth();await fetch(fbUrl(p,token),{method:'DELETE'})}catch{}}
+/* Escritura ATÓMICA "solo si está vacío" (igual que la app Android): el primero gana, el resto recibe 'conflict'.
+   Si el navegador no deja enviar la cabecera if-match (CORS), se cae a leer + escribir + releer. */
+async function fbPutIfEmpty(p,d){
+  const {token}=await getAuth();
+  try{
+    const r=await fetch(fbUrl(p,token),{method:'PUT',headers:{'Content-Type':'application/json','if-match':'null_etag'},body:JSON.stringify(d)});
+    if(r.ok)return 'ok';
+    if(r.status===412)return 'conflict';
+    throw new Error('FB PUT '+r.status);
+  }catch(e){
+    if(!(e instanceof TypeError))throw e;
+    const cur=await fbGet(p).catch(()=>null);
+    if(cur)return 'conflict';
+    await fbPut(p,d);
+    const chk=await fbGet(p).catch(()=>null);
+    return chk&&chk.sdp===d.sdp?'ok':'conflict';
+  }
+}
 
 /* ---------- GESTOR WEBRTC (P2P + SFU + MÓVIL INVITADO WEB) ---------- */
 class Room{
@@ -279,18 +302,34 @@ class Room{
     this.pc=null;this.es=null;this.stream=null;this.dead=false;
     this.onTrack=null;this.onStats=null;this.onEnd=null;
     this.seen=new Set();this.timer=null;this.mode='p2p';this.sfuKey=null;
-    this.activeGuestId=null;this.myUid=null;
+    this.myUid=null;
     this.answered=false;      // el host ya está gestionando una respuesta
     this.backlog=null;        // candidatos recibidos antes de tener remoteDescription
     this.pend=[];             // candidatos del host a publicar cuando la sala exista
     this.roomReady=false;
-    this.connTimer=null;
+    this.connTimer=null;this.ticking=false;
     this.npEs=null;this.npTimer=null;this.npRetry=null;this.npRaw=null; // nowPlaying (invitado)
+    // --- host multi-invitado ---
+    this.gmap={};             // id -> {via,hb,seen,status:'new'|'queued'|'ok'}
+    this.denied=new Set();    // invitados rechazados por el host
+    this.queue=[];this.asking=false;
+    this.p2pOk=false;         // el invitado P2P ya fue aceptado
+    this.sfuPc=null;this.sfuActive=false;this.sfuBusy=false;this.sfuFailAt=0;
+    // --- invitado ---
+    this.claimed=false;       // ganó el hueco P2P (answer)
+    this.waiting=false;       // en cola: espera a que el host abra la sala grupal
+    this.claiming=false;
+    this.gReady=false;this.pendG=[];this.mySdp=null;
+    this.via='wait';this.hb=0;this.hbTimer=null;this.presenceOk=false;this.miss=0;
+    this.waitTimer=null;this.sfuNext=0;
   }
   state(s){if(!this.dead)this.onState(s)}
   async mkPc(isSfu=false){
     const ice=await getIceServers();
     const pc=new RTCPeerConnection({iceServers:ice});
+    const hostSfu=isSfu&&this.role==='host';
+    // ¿sigue siendo esta la conexión vigente? (evita que una conexión cerrada/antigua tumbe la sala)
+    const mine=()=>hostSfu?pc===this.sfuPc:pc===this.pc;
     if(!isSfu){
       pc.onicecandidate=e=>{
         if(e.candidate&&!this.dead){
@@ -304,16 +343,15 @@ class Room{
             if(!this.roomReady){this.pend.push(payload);return}
             fbPost(`salas/${this.code}/hostCandidates`,payload).catch(()=>{});
           }else{
+            // Solo el invitado que ganó el hueco P2P publica candidatos; el resto los descarta.
+            if(!this.gReady){this.pendG.push(payload);return}
             fbPost(`salas/${this.code}/guestCandidates`,payload).catch(()=>{});
-            if(this.myUid){
-              fbPost(`salas/${this.code}/guests/${this.myUid}/candidates`,payload).catch(()=>{});
-            }
           }
         }
       };
     }
     pc.oniceconnectionstatechange=()=>{
-      if(this.dead)return;
+      if(this.dead||!mine())return;
       const iceSt=pc.iceConnectionState;
       if(this.role==='guest'&&iceSt==='checking'){
         $('gStats').textContent='Negociando red (ICE/TURN)…';
@@ -322,19 +360,27 @@ class Room{
       }
     };
     pc.onconnectionstatechange=()=>{
-      if(this.dead)return;
+      if(this.dead||!mine())return;
       const st=pc.connectionState;
+      const p2pHostInSfu=this.role==='host'&&!isSfu&&this.sfuActive; // el P2P ya no es imprescindible
       if(st==='connected'){
         clearTimeout(this.connTimer);
-        if(this.role==='guest')$('gStats').textContent=isSfu?'Modo grupal Cloudflare SFU':'Conexión directa P2P';
-        this.state(isSfu?'CONNECTED_SFU':'CONNECTED');
-      }else if(st==='disconnected')this.state('RECONNECTING');
-      else if(st==='failed'||st==='closed')this.end('IDLE');
+        if(this.role==='guest'){
+          $('gStats').textContent=isSfu?'Modo grupal Cloudflare SFU':'Conexión directa P2P';
+          if(isSfu)this.setVia('sfu');
+        }
+        this.state((isSfu||p2pHostInSfu)?'CONNECTED_SFU':'CONNECTED');
+      }else if(st==='disconnected'){
+        if(!p2pHostInSfu)this.state('RECONNECTING');
+      }else if(st==='failed'||st==='closed'){
+        if(p2pHostInSfu){try{pc.close()}catch{}if(this.pc===pc)this.pc=null}
+        else this.end('IDLE');
+      }
     };
     if(this.role==='guest'){
       pc.ontrack=e=>{if(this.onTrack)this.onTrack(e)};
     }
-    this.pc=pc;
+    if(hostSfu)this.sfuPc=pc;else this.pc=pc;
     return pc;
   }
   async listen(path,cb){
@@ -369,6 +415,8 @@ class Room{
     const b=this.backlog;this.backlog=null;
     if(b)await this.addCands(b);
   }
+
+  /* ================= HOST ================= */
   async hostStart(stream){
     this.stream=stream;
     stream.getAudioTracks()[0].onended=()=>this.end('IDLE');
@@ -387,74 +435,180 @@ class Room{
     this.pend=[];
     this.state('WAITING');
 
-    const tryHandleGuests=async(guests)=>{
-      if(!guests||typeof guests!=='object')return;
-      for(const [gid,g] of Object.entries(guests)){
-        if(!g||typeof g!=='object')continue;
-        if(g.answer&&g.answer.sdp&&!this.answered){
-          this.answered=true;
-          this.activeGuestId=gid;
-          await this.askApproval(g.answer,gid);
-        }
-        if(this.activeGuestId===gid&&g.candidates){
-          await this.addCands(g.candidates);
-        }
-      }
-    };
+    // Sondeo de respaldo (el SSE puede perder eventos): respuestas, candidatos y presencia de invitados
+    this.timer=setInterval(()=>{this.hostTick().catch(()=>{})},2000);
 
-    this.timer=setInterval(async()=>{
-      if(this.dead)return;
-      if(this.pc&&this.pc.connectionState==='connected'){clearInterval(this.timer);return}
-      const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
-      if(!snap)return;
-      if(snap.answer&&!this.answered){this.answered=true;await this.askApproval(snap.answer,null)}
-      if(snap.guestCandidates)await this.addCands(snap.guestCandidates);
-      if(snap.guests)await tryHandleGuests(snap.guests);
-    },1500);
-
-    await this.listen(`salas/${this.code}`,async(p,d)=>{
-      if(p==='/'&&d){
-        if(d.answer&&!this.answered){this.answered=true;await this.askApproval(d.answer,null)}
-        if(d.guestCandidates)await this.addCands(d.guestCandidates);
-        if(d.guests)await tryHandleGuests(d.guests);
-      }else if(p==='/answer'&&d&&!this.answered){
-        this.answered=true;await this.askApproval(d,null);
-      }else if(p.startsWith('/guestCandidates')){
-        const snap=await fbGet(`salas/${this.code}/guestCandidates`).catch(()=>null);
-        await this.addCands(snap);
-      }else if(p.startsWith('/guests')){
-        const snap=await fbGet(`salas/${this.code}/guests`).catch(()=>null);
-        await tryHandleGuests(snap);
-      }
+    await this.listen(`salas/${this.code}`,(p,d)=>{
+      try{
+        if(p==='/'){
+          if(d&&typeof d==='object')this.hostSnap(d);
+        }else if(p==='/answer'){
+          if(d&&d.sdp)this.hostSnap({answer:d,guests:undefined,_only:'answer'});
+        }else if(p.startsWith('/guestCandidates')){
+          fbGet(`salas/${this.code}/guestCandidates`).then(s=>this.addCands(s)).catch(()=>{});
+        }else if(p.startsWith('/guests')){
+          fbGet(`salas/${this.code}/guests`).then(s=>this.syncGuests(s)).catch(()=>{});
+        }
+      }catch{}
     });
   }
-  async askApproval(ans,guestId){
+  async hostTick(){
+    if(this.dead||this.ticking)return;
+    this.ticking=true;
+    try{
+      const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
+      if(!snap||this.dead)return;
+      this.hostSnap(snap);
+    }finally{this.ticking=false}
+  }
+  hostSnap(d){
+    if(d.answer&&d.answer.sdp&&!this.answered&&this.pc){
+      this.answered=true;
+      this.enqueue({kind:'p2p',ans:d.answer});
+    }
+    if(d._only)return;
+    if(d.guestCandidates)this.addCands(d.guestCandidates);
+    this.syncGuests(d.guests);
+  }
+  // Presencia de invitados (guests/{id}: {hb,via}); mismo protocolo que la app Android
+  syncGuests(obj){
+    if(this.dead)return;
+    const now=Date.now();
+    const o=(obj&&typeof obj==='object')?obj:{};
+    for(const id of Object.keys(this.gmap))if(!(id in o))delete this.gmap[id];
+    for(const [id,g] of Object.entries(o)){
+      if(!g||typeof g!=='object')continue;
+      if(this.denied.has(id)){fbDel(`salas/${this.code}/guests/${id}`);continue}
+      let e=this.gmap[id];
+      if(!e)e=this.gmap[id]={status:'new',via:'wait',hb:null,seen:now};
+      if(e.hb!==g.hb){e.hb=g.hb;e.seen=now}
+      if(typeof g.via==='string')e.via=g.via;
+    }
+    for(const [id,e] of Object.entries(this.gmap)){
+      if(now-e.seen>C.STALE_MS){delete this.gmap[id];fbDel(`salas/${this.code}/guests/${id}`)}
+    }
+    this.hostEvaluate();
+  }
+  hostEvaluate(){
+    if(this.dead)return;
+    let wantSfu=false;
+    for(const [id,e] of Object.entries(this.gmap)){
+      if(e.via==='p2p'){          // el invitado P2P se aprueba por su "answer"
+        if(this.p2pOk)e.status='ok';
+        continue;
+      }
+      if(e.status==='new'){e.status='queued';this.enqueue({kind:'g',id})}
+      else if(e.status==='ok')wantSfu=true;
+    }
+    if(wantSfu&&!this.sfuActive&&!this.sfuBusy&&C.SFU_PROXY&&Date.now()>this.sfuFailAt)this.hostStartSfu();
+    // Todos migraron al SFU: cerramos el P2P y limpiamos su señalización
+    if(this.sfuActive&&this.pc&&!Object.values(this.gmap).some(e=>e.via==='p2p'))this.hostDropP2p();
+    const n=Object.values(this.gmap).filter(e=>e.status==='ok').length;
+    $('hStats').textContent=n?`${n} invitado${n>1?'s':''} escuchando`:'';
+  }
+  enqueue(it){this.queue.push(it);this.pump()}
+  async pump(){
+    if(this.asking||this.dead)return;
+    this.asking=true;
+    try{
+      while(this.queue.length&&!this.dead){
+        const it=this.queue.shift();
+        try{
+          if(it.kind==='p2p')await this.handleP2pAnswer(it.ans);
+          else await this.handleWaiter(it.id);
+        }catch{}
+      }
+    }finally{this.asking=false}
+    this.restoreState();
+  }
+  restoreState(){
+    if(this.dead)return;
+    if(this.sfuActive)this.state('CONNECTED_SFU');
+    else if(this.pc&&this.pc.connectionState==='connected')this.state('CONNECTED');
+    else if(this.p2pOk)this.state('CONNECTING');
+    else this.state('WAITING');
+  }
+  async handleP2pAnswer(ans){
     this.state('APPROVAL');
     const ok=await askModal();
     if(this.dead)return;
-    if(!ok){
-      if(guestId){
-        await fbDel(`salas/${this.code}/guests/${guestId}`);
-        this.activeGuestId=null;
-      }else{
-        await fbDel(`salas/${this.code}/answer`);
-        await fbDel(`salas/${this.code}/guestCandidates`);
-      }
+    if(!ok||!this.pc){
+      await fbDel(`salas/${this.code}/answer`);
+      await fbDel(`salas/${this.code}/guestCandidates`);
       this.backlog=null;
       this.answered=false;   // permitir que entre otro invitado
-      this.state('WAITING');
       return;
     }
     this.state('CONNECTING');
-    await this.pc.setRemoteDescription({type:'answer',sdp:tuneOpus(ans.sdp)});
-    await this.flushBacklog();
-    if(guestId){
-      const gSnap=await fbGet(`salas/${this.code}/guests/${guestId}/candidates`).catch(()=>null);
-      await this.addCands(gSnap);
+    try{
+      await this.pc.setRemoteDescription({type:'answer',sdp:tuneOpus(ans.sdp)});
+    }catch{
+      this.answered=false;return;
     }
+    this.p2pOk=true;
+    await this.flushBacklog();
     const g=await fbGet(`salas/${this.code}/guestCandidates`).catch(()=>null);
     await this.addCands(g);
+    this.hostEvaluate();
   }
+  async handleWaiter(id){
+    if(!this.gmap[id])return;
+    this.state('APPROVAL');
+    const ok=await askModal();
+    if(this.dead)return;
+    const e=this.gmap[id];
+    if(!e)return;           // se fue mientras decidías
+    if(ok){e.status='ok'}
+    else{
+      this.denied.add(id);delete this.gmap[id];
+      await fbDel(`salas/${this.code}/guests/${id}`);
+    }
+    this.hostEvaluate();
+  }
+  // El host publica UNA pista en Cloudflare SFU y avisa por Firebase (nodo "sfu"); todos los invitados la escuchan
+  async hostStartSfu(){
+    if(this.sfuBusy||this.sfuActive||this.dead||!this.stream)return;
+    this.sfuBusy=true;
+    try{
+      const ses=await sfuCall('/sessions/new','POST');
+      const pc=await this.mkPc(true);
+      const trk=this.stream.getAudioTracks()[0];
+      const tr=pc.addTransceiver(trk,{direction:'sendonly',streams:[this.stream]});
+      const off=await pc.createOffer();
+      off.sdp=tuneOpus(off.sdp);
+      await pc.setLocalDescription(off);
+      await boostSender(pc);
+      const mid=tr.mid;
+      const res=await sfuCall(`/sessions/${ses.sessionId}/tracks/new`,'POST',{
+        sessionDescription:{type:'offer',sdp:off.sdp},
+        tracks:[{location:'local',mid,trackName:C.SFU_TRACK}]
+      });
+      if(!res.sessionDescription||!res.sessionDescription.sdp)throw new Error('SFU sin respuesta');
+      await pc.setRemoteDescription({type:'answer',sdp:res.sessionDescription.sdp});
+      for(let i=0;i<60&&!this.dead&&pc.connectionState!=='connected';i++)await sleep(200);
+      if(pc.connectionState!=='connected')throw new Error('SFU: ICE no conectó');
+      await fbPut(`salas/${this.code}/sfu`,{sessionId:ses.sessionId,trackName:C.SFU_TRACK,mid,ts:Date.now()});
+      this.sfuActive=true;
+      this.state('CONNECTED_SFU');
+      toast('Sala grupal activada');
+    }catch(e){
+      this.sfuFailAt=Date.now()+10000;
+      const s=this.sfuPc;this.sfuPc=null;
+      if(s){try{s.close()}catch{}}
+      if(!this.dead)toast('No se pudo abrir la sala grupal');
+    }finally{this.sfuBusy=false}
+    this.hostEvaluate();
+  }
+  async hostDropP2p(){
+    const pc=this.pc;
+    if(!pc)return;
+    this.pc=null;
+    try{pc.close()}catch{}
+    this.backlog=null;
+    fbPatch(`salas/${this.code}`,{offer:null,answer:null,hostCandidates:null,guestCandidates:null}).catch(()=>{});
+  }
+
+  /* ================= INVITADO ================= */
   // nowPlaying del invitado: SSE propio (independiente de P2P/SFU) + sondeo lento de respaldo
   startNp(){
     const open=async()=>{
@@ -492,17 +646,121 @@ class Room{
       fbGet(`salas/${this.code}/nowPlaying`).then(v=>{if(!this.dead){this.npRaw=v;applyNp(v)}}).catch(()=>{});
     },20000);
   }
-  async guestStart(){
-    this.state('CONNECTING');
-    $('gStats').textContent='Buscando sala…';
-    // Tiempo máximo de espera: si el host no responde, no nos quedamos en "Conectando…" para siempre
+  armConn(ms){
+    clearTimeout(this.connTimer);
     this.connTimer=setTimeout(()=>{
-      if(this.dead)return;
+      if(this.dead||this.waiting)return;     // en cola manda waitTimer
       if(!this.pc||this.pc.connectionState!=='connected'){
         $('gStats').textContent='El anfitrión no respondió o la red bloquea la conexión.';
         this.end('FAILED');
       }
-    },C.CONN_MS);
+    },ms);
+  }
+  // Presencia: guests/{uid} = {hb,via}. via: 'p2p' | 'wait' | 'sfu'
+  async writePresence(){
+    if(this.dead||!this.myUid)return;
+    try{
+      await fbPut(`salas/${this.code}/guests/${this.myUid}`,{hb:++this.hb,via:this.via});
+      this.presenceOk=true;
+    }catch{}
+  }
+  startPresence(via){
+    this.via=via;
+    this.writePresence();
+    if(!this.hbTimer)this.hbTimer=setInterval(()=>this.writePresence(),C.HB_MS);
+  }
+  setVia(v){this.via=v;this.writePresence()}
+  // Si el host nos borra de guests/ (rechazo/expulsión), salimos
+  async checkPresence(guests){
+    if(!this.presenceOk||this.dead)return;
+    let me;
+    if(guests===undefined){
+      try{me=await fbGet(`salas/${this.code}/guests/${this.myUid}`)}catch{return}
+    }else me=guests?guests[this.myUid]:null;
+    if(me){this.miss=0;return}
+    if(++this.miss>=2){
+      $('gStats').textContent='El anfitrión rechazó tu entrada.';
+      this.end('FAILED');
+    }
+  }
+  // Intenta quedarse con el hueco P2P (answer) de forma atómica. Si ya está ocupado, pasa a la cola del SFU.
+  async tryJoinP2p(room){
+    if(this.claiming||this.dead)return;
+    this.claiming=true;
+    try{
+      if(this.pc){try{this.pc.close()}catch{}this.pc=null}
+      this.mode='p2p';this.gReady=false;this.pendG=[];this.seen=new Set();this.backlog=null;
+      const pc=await this.mkPc(false);
+      pc.addTransceiver('audio',{direction:'recvonly'});
+      await pc.setRemoteDescription({type:'offer',sdp:tuneOpus(room.offer.sdp)});
+      const ans=await pc.createAnswer();
+      ans.sdp=tuneOpus(ans.sdp);
+      await pc.setLocalDescription(ans);
+      const res=await fbPutIfEmpty(`salas/${this.code}/answer`,{type:'answer',sdp:ans.sdp});
+      if(this.dead)return;
+      if(res==='ok'){
+        this.claimed=true;this.waiting=false;clearTimeout(this.waitTimer);
+        this.mySdp=ans.sdp;
+        this.startPresence('p2p');
+        this.gReady=true;
+        for(const c of this.pendG)fbPost(`salas/${this.code}/guestCandidates`,c).catch(()=>{});
+        this.pendG=[];
+        $('gStats').textContent='Esperando aceptación del anfitrión…';
+        if(room.hostCandidates)await this.addCands(room.hostCandidates);
+        this.armConn(C.CONN_MS);
+      }else{
+        try{pc.close()}catch{}
+        if(this.pc===pc)this.pc=null;
+        this.claimed=false;
+        this.enterWait();
+      }
+    }finally{this.claiming=false}
+  }
+  enterWait(){
+    this.waiting=true;
+    this.startPresence('wait');
+    this.state('CONNECTING');
+    $('gStats').textContent='Hay otro invitado: esperando a que el anfitrión te acepte y abra la sala grupal…';
+    clearTimeout(this.connTimer);clearTimeout(this.waitTimer);
+    this.waitTimer=setTimeout(()=>{
+      if(this.dead||this.mode==='sfu')return;
+      $('gStats').textContent='El anfitrión no abrió la sala grupal (sala llena o sin aceptar).';
+      this.end('FAILED');
+    },C.WAIT_MS);
+  }
+  async demote(){   // otro invitado se quedó con el hueco P2P: pasamos a la cola
+    if(this.pc){try{this.pc.close()}catch{}this.pc=null}
+    this.claimed=false;this.gReady=false;this.pendG=[];
+    this.enterWait();
+  }
+  async guestTick(){
+    if(this.dead||this.ticking)return;
+    this.ticking=true;
+    try{
+      if(this.pc&&this.pc.connectionState==='connected'){await this.checkPresence();return}
+      const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
+      if(!snap||this.dead)return;
+      if(snap.nowPlaying)applyNp(snap.nowPlaying);
+      if(snap.sfu&&snap.sfu.sessionId&&snap.sfu.trackName){
+        await this.connectSfuGuest(snap.sfu);
+        if(this.mode==='sfu')return;
+      }
+      if(this.mode==='p2p'){
+        if(this.claimed){
+          if(!snap.answer){$('gStats').textContent='El anfitrión rechazó tu entrada.';this.end('FAILED');return}
+          if(snap.answer.sdp!==this.mySdp){await this.demote();return}
+          if(snap.hostCandidates)await this.addCands(snap.hostCandidates);
+        }else if(this.waiting&&!this.claiming&&snap.offer&&!snap.answer){
+          await this.tryJoinP2p(snap);   // el hueco P2P se liberó: lo intentamos de nuevo
+        }
+      }
+      await this.checkPresence(snap.guests||null);
+    }finally{this.ticking=false}
+  }
+  async guestStart(){
+    this.state('CONNECTING');
+    $('gStats').textContent='Buscando sala…';
+    this.armConn(C.CONN_MS);
     const {uid}=await getAuth();
     this.myUid=uid;
     this.startNp();
@@ -512,111 +770,104 @@ class Room{
 
     if(room.sfu&&room.sfu.sessionId&&room.sfu.trackName){
       await this.connectSfuGuest(room.sfu);
-      return;
+    }else{
+      await this.tryJoinP2p(room);
     }
 
-    this.mode='p2p';
-    const pc=await this.mkPc(false);
-    pc.addTransceiver('audio',{direction:'recvonly'});
-    await pc.setRemoteDescription({type:'offer',sdp:tuneOpus(room.offer.sdp)});
-    const ans=await pc.createAnswer();
-    ans.sdp=tuneOpus(ans.sdp);
-    await pc.setLocalDescription(ans);
-
-    const ansPayload={type:'answer',sdp:ans.sdp};
-    await fbPatch(`salas/${this.code}`,{answer:ansPayload});
-    await fbPatch(`salas/${this.code}/guests/${uid}`,{joinedAt:Date.now(),answer:ansPayload}).catch(()=>{});
-    $('gStats').textContent='Esperando aceptación del anfitrión…';
-
-    if(room.hostCandidates)await this.addCands(room.hostCandidates);
-
-    this.timer=setInterval(async()=>{
-      if(this.dead)return;
-      if(this.pc&&this.pc.connectionState==='connected'){clearInterval(this.timer);return}
-      const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
-      if(!snap)return;
-      if(snap.nowPlaying)applyNp(snap.nowPlaying);
-      if(snap.sfu&&snap.sfu.sessionId&&snap.sfu.trackName&&this.mode!=='sfu'){
-        await this.connectSfuGuest(snap.sfu);
-        return;
-      }
-      if(snap.hostCandidates)await this.addCands(snap.hostCandidates);
-    },1500);
+    this.timer=setInterval(()=>{this.guestTick().catch(()=>{})},1500);
 
     await this.listen(`salas/${this.code}`,async(p,d)=>{
       if(this.dead)return;
-      if(p==='/'&&d){
-        if(d.nowPlaying)applyNp(d.nowPlaying);
-        if(d.sfu&&d.sfu.sessionId&&d.sfu.trackName&&this.mode!=='sfu'){
-          await this.connectSfuGuest(d.sfu);
-          return;
+      try{
+        if(p==='/'&&d){
+          if(d.nowPlaying)applyNp(d.nowPlaying);
+          if(d.sfu&&d.sfu.sessionId&&d.sfu.trackName){
+            await this.connectSfuGuest(d.sfu);
+            if(this.mode==='sfu')return;
+          }
+          if(this.claimed&&d.hostCandidates)await this.addCands(d.hostCandidates);
+        }else if(p==='/nowPlaying'&&d&&typeof d==='object'){
+          applyNp(d);
+        }else if(p==='/sfu'&&d&&d.sessionId&&d.trackName){
+          await this.connectSfuGuest(d);
+        }else if(p.startsWith('/hostCandidates')&&this.mode==='p2p'&&this.claimed){
+          if(p==='/hostCandidates')await this.addCands(d);
+          else if(d)await this.addCands({[p.split('/').pop()]:d});
         }
-        if(d.hostCandidates)await this.addCands(d.hostCandidates);
-      }else if(p==='/nowPlaying'&&d&&typeof d==='object'){
-        applyNp(d);
-      }else if(p==='/sfu'&&d&&d.sessionId&&d.trackName&&this.mode!=='sfu'){
-        await this.connectSfuGuest(d);
-      }else if(p.startsWith('/hostCandidates')&&this.mode==='p2p'){
-        if(p==='/hostCandidates')await this.addCands(d);
-        else if(d)await this.addCands({[p.split('/').pop()]:d});
-      }
+      }catch{}
     });
   }
   async connectSfuGuest(sfu){
     const key=`${sfu.sessionId}:${sfu.trackName}`;
-    if(this.sfuKey===key)return;
+    if(this.sfuKey===key||Date.now()<this.sfuNext)return;
     this.sfuKey=key;
     this.mode='sfu';
+    this.claimed=false;this.waiting=false;this.gReady=false;
+    clearTimeout(this.waitTimer);
+    if(!this.hbTimer)this.startPresence('wait');   // el host nos verá (y aprobará) por la presencia
     this.state('CONNECTING');
     $('gStats').textContent='Conectando por Cloudflare SFU…';
+    this.armConn(C.CONN_MS/2);
     if(this.pc){try{this.pc.close()}catch{}this.pc=null}
+    try{
+      const ses=await sfuCall('/sessions/new','POST');
+      const guestSessionId=ses.sessionId;
+      const pc=await this.mkPc(true);
+      pc.addTransceiver('audio',{direction:'recvonly'});
 
-    const ses=await sfuCall('/sessions/new','POST');
-    const guestSessionId=ses.sessionId;
-    const pc=await this.mkPc(true);
-    pc.addTransceiver('audio',{direction:'recvonly'});
+      const off=await pc.createOffer();
+      off.sdp=tuneOpus(off.sdp);
+      await pc.setLocalDescription(off);
 
-    const off=await pc.createOffer();
-    off.sdp=tuneOpus(off.sdp);
-    await pc.setLocalDescription(off);
-
-    const trRes=await sfuCall(`/sessions/${guestSessionId}/tracks/new`,'POST',{
-      sessionDescription:{type:'offer',sdp:off.sdp},
-      tracks:[{
-        location:'remote',
-        sessionId:sfu.sessionId,
-        trackName:sfu.trackName,
-        mid:'0'
-      }]
-    });
-
-    if(trRes.sessionDescription&&trRes.sessionDescription.sdp){
-      await pc.setRemoteDescription({
-        type:trRes.sessionDescription.type||'answer',
-        sdp:tuneOpus(trRes.sessionDescription.sdp)
+      const trRes=await sfuCall(`/sessions/${guestSessionId}/tracks/new`,'POST',{
+        sessionDescription:{type:'offer',sdp:off.sdp},
+        tracks:[{
+          location:'remote',
+          sessionId:sfu.sessionId,
+          trackName:sfu.trackName,
+          mid:'0'
+        }]
       });
-    }
-    if(trRes.requiresImmediateRenegotiation){
-      const ans2=await pc.createAnswer();
-      ans2.sdp=tuneOpus(ans2.sdp);
-      await pc.setLocalDescription(ans2);
-      await sfuCall(`/sessions/${guestSessionId}/renegotiate`,'PUT',{
-        sessionDescription:{type:'answer',sdp:ans2.sdp}
-      });
+
+      if(trRes.sessionDescription&&trRes.sessionDescription.sdp){
+        await pc.setRemoteDescription({
+          type:trRes.sessionDescription.type||'answer',
+          sdp:tuneOpus(trRes.sessionDescription.sdp)
+        });
+      }
+      if(trRes.requiresImmediateRenegotiation){
+        const ans2=await pc.createAnswer();
+        ans2.sdp=tuneOpus(ans2.sdp);
+        await pc.setLocalDescription(ans2);
+        await sfuCall(`/sessions/${guestSessionId}/renegotiate`,'PUT',{
+          sessionDescription:{type:'answer',sdp:ans2.sdp}
+        });
+      }
+    }catch(e){
+      if(this.dead)return;
+      this.sfuKey=null;this.sfuNext=Date.now()+4000;   // reintento en el próximo sondeo
+      if(this.pc){try{this.pc.close()}catch{}this.pc=null}
+      $('gStats').textContent='Error en la sala grupal, reintentando…';
     }
   }
   end(s='IDLE'){
     if(this.dead)return;
     this.dead=true;
     clearInterval(this.timer);
-    clearTimeout(this.connTimer);
+    clearInterval(this.hbTimer);
+    clearTimeout(this.connTimer);clearTimeout(this.waitTimer);
     if(this.es)this.es.close();
     clearInterval(this.npTimer);clearTimeout(this.npRetry);
     if(this.npEs)this.npEs.close();
     if(this.pc)this.pc.close();
+    if(this.sfuPc){try{this.sfuPc.close()}catch{}}
     if(this.stream)this.stream.getTracks().forEach(t=>t.stop());
-    if(this.role==='host')fbDel(`salas/${this.code}`);
-    else if(this.myUid)fbDel(`salas/${this.code}/guests/${this.myUid}`);
+    if(this.role==='host'){fbDel(`salas/${this.code}`);$('hStats').textContent=''}
+    else if(this.myUid){
+      fbDel(`salas/${this.code}/guests/${this.myUid}`);
+      // Si éramos el invitado P2P y nos vamos, liberamos el hueco para el siguiente
+      if(this.claimed&&this.mySdp)fbGet(`salas/${this.code}/answer`).then(an=>{if(an&&an.sdp===this.mySdp)fbDel(`salas/${this.code}/answer`)}).catch(()=>{});
+    }
     this.onState(s);
     if(this.onEnd)this.onEnd();
   }
