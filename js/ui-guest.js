@@ -30,6 +30,8 @@ function guestUi(s){
   $('joinBtn').className='btn'+(live?' stop':'');
   $('joinBtn').disabled=!live&&!codeOk();
   $('code').disabled=live;
+  $('nick').disabled=live;
+  if(!live)showPeople('gPeople',[]);
   if(live){
     npVisible=(s==='CONNECTED'||s==='CONNECTED_SFU'||s==='RECONNECTING');
     renderNp();$('npCard').classList.toggle('paused',s==='RECONNECTING');
@@ -40,6 +42,9 @@ function guestUi(s){
       $('gStats').textContent='No se pudo contactar con el servidor o la sala no existe.';
   }
 }
+
+try{$('nick').value=localStorage.getItem('shelyn_nick')||''}catch{}
+$('nick').oninput=()=>{try{localStorage.setItem('shelyn_nick',$('nick').value)}catch{}};
 
 $('code').oninput=()=>{$('joinBtn').disabled=!codeOk()};
 $('joinBtn').onclick=()=>{
