@@ -62,7 +62,7 @@ Object.assign(Room.prototype,{
       }
       if(silent>=C.HOST_LOST_MS){
         if(!this.away){this.away=true;this.state('RECONNECTING')}
-        $('gStats').textContent=`Anfitrión desconectado. Esperando a que vuelva… (${Math.ceil((C.HOST_GRACE_MS-silent)/1000)} s)`;
+        $('gStats').textContent=`${this.hostName||'Anfitrión'} desconectado. Esperando a que vuelva… (${Math.ceil((C.HOST_GRACE_MS-silent)/1000)} s)`;
         // por si se perdió el aviso de sala nueva
         const g=await fbGet(`salas/${this.code}/gen`).catch(()=>null);
         if(g&&this.gen&&g!==this.gen&&!this.dead){
@@ -136,8 +136,9 @@ Object.assign(Room.prototype,{
       try{guests=await fbGet(`salas/${this.code}/guests`)}catch{return}
       if(this.dead)return;
     }
-    showPeople('gPeople',Object.entries(guests||{}).map(([id,g])=>
-      (nickName(g&&g.name)||'Invitado')+(id===this.myUid?' (tú)':'')+(g&&g.via==='wait'?' · en espera':'')).sort());
+    const people=Object.entries(guests||{}).map(([id,g])=>
+      (nickName(g&&g.name)||'Invitado')+(id===this.myUid?' (tú)':'')+(g&&g.via==='wait'?' · en espera':'')).sort();
+    showPeople('gPeople',[(this.hostName||'Anfitrión')+' · anfitrión',...people]);
     const me=guests?guests[this.myUid]:null;
     if(me){this.miss=0;return}
     if(++this.miss>=2){
@@ -241,6 +242,7 @@ Object.assign(Room.prototype,{
       $('gStats').textContent='El anfitrión no está activo (sala caducada).';
       this.end('FAILED');return;
     }
+    this.hostName=nickName(room.hostName);
     this.roomSeen=true;this.gen=room.gen||null;this.hbSeen=!!room.hb;this.lastHb=Date.now();
     this.watchTimer=setInterval(()=>this.watch().catch(()=>{}),3000);
     if(room.nowPlaying)applyNp(room.nowPlaying);
@@ -258,6 +260,7 @@ Object.assign(Room.prototype,{
       try{
         if(p==='/'&&d){
           if(d.hb){this.lastHb=Date.now();this.hbSeen=true}
+          if(d.hostName!==undefined)this.hostName=nickName(d.hostName);
           if(d.gen&&this.gen&&d.gen!==this.gen){await this.rejoin(d);return}   // el host volvió con una sala nueva
           if(d.nowPlaying)applyNp(d.nowPlaying);
           if(d.sfu&&d.sfu.sessionId&&d.sfu.trackName){
@@ -268,6 +271,8 @@ Object.assign(Room.prototype,{
         }else if(p==='/'&&d===null){   // el host cerró la sala a propósito
           $('gStats').textContent='El anfitrión cerró la sala.';
           this.end('IDLE');
+        }else if(p==='/hostName'){
+          this.hostName=nickName(d);
         }else if(p==='/hb'){
           this.lastHb=Date.now();this.hbSeen=true;
         }else if(p==='/nowPlaying'&&d&&typeof d==='object'){

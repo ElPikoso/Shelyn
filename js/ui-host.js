@@ -7,6 +7,7 @@ function hostUi(s){
   $('hostBtn').textContent=live?'Detener transmisión':'Elegir pestaña y crear sala';
   $('hostBtn').className='btn'+(live?' stop':'');
   $('shareBtn').hidden=!live;
+  $('hNick').disabled=live;
   if(!live)showPeople('hPeople',[]);
   if(!live){$('hCode').textContent='– – – –';$('hCode').className='code off'}
 }
@@ -39,6 +40,9 @@ addEventListener('pagehide',()=>{
   if(Object.keys(r.gmap).length)return;   // hay invitados: la sala se conserva para que el host pueda volver (plazo de gracia)
   try{fetch(fbUrl(`salas/${r.code}`,authState.token),{method:'DELETE',keepalive:true})}catch{}
 });
+
+try{$('hNick').value=localStorage.getItem('shelyn_hnick')||''}catch{}
+$('hNick').oninput=()=>{try{localStorage.setItem('shelyn_hnick',$('hNick').value)}catch{}};
 
 $('shareBtn').onclick=async()=>{
   if(!hostRoom)return;

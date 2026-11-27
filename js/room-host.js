@@ -15,7 +15,7 @@ Object.assign(Room.prototype,{
     off.sdp=tuneOpus(off.sdp);
     await pc.setLocalDescription(off);
     await boostSender(pc);
-    await fbPut(`salas/${this.code}`,{owner:uid,gen:Date.now()+'-'+Math.random().toString(36).slice(2,6),hb:{'.sv':'timestamp'},offer:{type:'offer',sdp:off.sdp}});
+    await fbPut(`salas/${this.code}`,{owner:uid,hostName:nickName($('hNick').value),gen:Date.now()+'-'+Math.random().toString(36).slice(2,6),hb:{'.sv':'timestamp'},offer:{type:'offer',sdp:off.sdp}});
     // La sala ya existe: publicar los candidatos acumulados
     this.roomReady=true;
     for(const p of this.pend)fbPost(`salas/${this.code}/hostCandidates`,p).catch(()=>{});
