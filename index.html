@@ -93,10 +93,11 @@ const C={
   BASE:'https://elpikoso.github.io/Shelyn/',
   SFU_PROXY:'https://shelyn-sfu.xterrablazexop.workers.dev',
   STUN:'stun:stun.l.google.com:19302',
-  BR:80000,
-  JB:40,
-  JBH:250,
-  PT:20,
+  BR:96000,        // Opus estéreo 96 kbps
+  JB:15,           // jitterBufferTarget (ms) en primer plano
+  JBH:40,          // jitterBufferTarget (ms) en segundo plano
+  PT:10,           // ptime (ms)
+  MAXPT:20,        // maxptime (ms)
   MODAL_MS:45000,   // tiempo que tiene el host para aceptar
   CONN_MS:30000     // tiempo máximo del invitado esperando conexión
 };
@@ -170,7 +171,7 @@ async function sfuCall(path,method,body){
   return r.json();
 }
 
-/* ---------- SDP OPUS (80 kbps estéreo + FEC + ptime 20) ----------
+/* ---------- SDP OPUS (96 kbps estéreo + FEC + ptime 10 / minptime 10 / maxptime 20) ----------
    ptime se coloca DESPUÉS de fmtp (dentro de la sección de medios, nunca entre m= y c=). */
 function tuneOpus(sdp){
   const lines=sdp.split('\r\n');
@@ -181,20 +182,34 @@ function tuneOpus(sdp){
   }
   if(!pt)return sdp;
   const fmtp=`a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=${C.BR}`;
-  const ptime=`a=ptime:${C.PT}`;
+  const ptime=`a=ptime:${C.PT}`,maxptime=`a=maxptime:${C.MAXPT}`;
   const base=lines.filter(l=>!l.startsWith('a=ptime:')&&!l.startsWith('a=maxptime:'));
   const out=[];
   let done=false;
   for(const l of base){
     if(l.startsWith('a=fmtp:'+pt+' ')){
-      out.push(fmtp,ptime);done=true;
+      out.push(fmtp,ptime,maxptime);done=true;
     }else out.push(l);
   }
   if(!done){
     const idx=out.findIndex(l=>l.startsWith('a=rtpmap:'+pt+' '));
-    if(idx>=0)out.splice(idx+1,0,fmtp,ptime);
+    if(idx>=0)out.splice(idx+1,0,fmtp,ptime,maxptime);
   }
   return out.join('\r\n');
+}
+
+/* ---------- PRIORIDAD DE RED DEL EMISOR (HOST) ---------- */
+async function boostSender(pc){
+  for(const s of pc.getSenders()){
+    if(!s.track||s.track.kind!=='audio')continue;
+    try{
+      const p=s.getParameters();
+      if(!p.encodings||!p.encodings.length)p.encodings=[{}];
+      p.encodings[0].priority='high';
+      p.encodings[0].networkPriority='high';
+      await s.setParameters(p);
+    }catch{}
+  }
 }
 
 /* ---------- FIREBASE REST + SSE AUTENTICADO ---------- */
@@ -310,6 +325,7 @@ class Room{
     const off=await pc.createOffer();
     off.sdp=tuneOpus(off.sdp);
     await pc.setLocalDescription(off);
+    await boostSender(pc);
     await fbPut(`salas/${this.code}`,{owner:uid,offer:{type:'offer',sdp:off.sdp}});
     // La sala ya existe: publicar los candidatos acumulados
     this.roomReady=true;
@@ -522,7 +538,12 @@ function askModal(){
 
 /* ---------- UI ---------- */
 let hostRoom=null,guestRoom=null,rxr=null;
-const setJb=()=>{if(rxr)try{rxr.jitterBufferTarget=document.hidden?C.JBH:C.JB}catch{}};
+const setJb=()=>{
+  if(!rxr)return;
+  const ms=document.hidden?C.JBH:C.JB;
+  try{rxr.jitterBufferTarget=ms}catch{}
+  try{rxr.playoutDelayHint=ms/1000}catch{}
+};
 document.addEventListener('visibilitychange',setJb);
 
 const tab=h=>{$('tG').classList.toggle('on',!h);$('tH').classList.toggle('on',h);$('pG').hidden=h;$('pH').hidden=!h};
@@ -597,7 +618,17 @@ $('hostBtn').onclick=async()=>{
   $('hWarn').textContent='';
   let stream;
   try{
-    stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+    stream=await navigator.mediaDevices.getDisplayMedia({
+      video:true,
+      audio:{
+        channelCount:2,
+        sampleRate:48000,
+        latency:0.01,
+        echoCancellation:false,
+        noiseSuppression:false,
+        autoGainControl:false
+      }
+    });
   }catch{
     $('hWarn').textContent='Permiso cancelado o navegador no compatible.';
     return;
@@ -607,6 +638,7 @@ $('hostBtn').onclick=async()=>{
     $('hWarn').textContent='No marcaste "Compartir audio de la pestaña".';
     return;
   }
+  stream.getAudioTracks().forEach(t=>{try{t.contentHint='music'}catch{}});
   const code=Math.floor(1000+Math.random()*9000);
   $('hCode').textContent=code;$('hCode').className='code';
   const r=hostRoom=new Room('host',code,hostUi);
