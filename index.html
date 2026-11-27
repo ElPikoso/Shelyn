@@ -1,91 +1,73 @@
-// Proxy mínimo para Cloudflare Realtime (SFU + TURN). Guarda el App Secret y el TURN key FUERA del APK.
-//
-// Rutas (las mismas que usa CloudflareRealtimeClient.kt en modo proxy):
-//   GET  /ice                          -> credenciales STUN/TURN de vida corta
-//   POST /sessions/new
-//   POST /sessions/{id}/tracks/new
-//   PUT  /sessions/{id}/renegotiate
-//   PUT  /sessions/{id}/tracks/close
-//
-// Cabeceras de la app: X-Shelyn-Key (clave compartida) y X-Shelyn-Room (código de 4 cifras).
-// Las rutas /sessions/* solo funcionan si la sala existe en Firebase (el host la publica antes de usar el SFU).
-//
-// Honestidad: la clave compartida va en el APK, así que se puede extraer. Este proxy impide que se
-// use TU token de Cloudflare para otra cosa (crear apps, borrar, etc.) y te deja revocar/limitar
-// desde un único sitio. Añade Rate Limiting de Cloudflare (WAF) sobre este Worker para frenar abusos.
+<div id="hostUi">
+<div><label>CÓDIGO DE SALA</label><div id="hCode" class="code off">– – – –</div></div>
+<p id="hWarn" class="msg warn" role="alert"></p>
+<p id="hStats" class="note"></p>
+<button id="shareBtn" class="btn sec" hidden>Compartir enlace</button>
+<button id="hostBtn" class="btn">Elegir pestaña y crear sala</button>
+<p class="note">Solo se transmite el audio de la pestaña elegida; el vídeo se descarta al instante.</p>
+</div>
+</section>
+</main>
 
-const CF_BASE = "https://rtc.live.cloudflare.com/v1";
-const MAX_BODY = 64 * 1024; // un SDP de audio pesa ~2-4 KB
-const SESSION_ID = /^[0-9a-f]{32}$/;
+<div id="modal" hidden><div class="card" role="dialog" aria-modal="true">
+<h2>Un invitado quiere unirse</h2>
+<p class="msg">¿Le dejas escuchar tu audio? Se rechazará solo en 20 s.</p>
+<button id="yes" class="btn">Aceptar</button><button id="no" class="btn stop">Rechazar</button>
+</div></div>
+<div id="toast" hidden></div>
+<audio id="player" autoplay playsinline></audio>
 
-const ROUTES = [
-  { method: "POST", re: /^\/sessions\/new$/ },
-  { method: "POST", re: /^\/sessions\/([0-9a-f]{32})\/tracks\/new$/ },
-  { method: "PUT", re: /^\/sessions\/([0-9a-f]{32})\/renegotiate$/ },
-  { method: "PUT", re: /^\/sessions\/([0-9a-f]{32})\/tracks\/close$/ },
-];
-
-function json(obj, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+<script>
+'use strict';
+const C={DB:'https://shelyn-86208-default-rtdb.europe-west1.firebasedatabase.app',
+KEY:'AIzaSyCs-uCindNEB647fzhdZn2gLW52zigJwMg',                                // Firebase Web API key (no es secreta; restríngela por dominio)
+BASE:'https://elpikoso.github.io/Shelyn/',           // URL pública de esta web (para "Compartir enlace")
+ STUN:'stun:stun.l.google.com:19302',BR:160000,JB:40,PT:10,
+ TURN:{urls:[],username:'',credential:''}}  // TURN opcional: urls:['turn:HOST:443?transport=tcp','turns:HOST:443?transport=tcp']  // JB: buffer de jitter objetivo en ms (menos = menos retraso, más riesgo de cortes);
+ STUN:'stun:stun.l.google.com:19302',BR:160000,JB:40,JBH:250,PT:10,
+ TURN:{urls:[],username:'',credential:''}}  // TURN opcional: urls:['turn:HOST:443?transport=tcp','turns:HOST:443?transport=tcp']  // JB: buffer de jitter objetivo en ms (JBH: el mismo, pero con la pantalla apagada o la pestaña oculta) (menos = menos retraso, más riesgo de cortes);
+const $=id=>document.getElementById(id), a=$('player');
+const ST={IDLE:['Desconectado','grey'],CREATING:['Creando sala…','amber'],WAITING:['Esperando invitado…','amber'],APPROVAL:['Invitado pidiendo entrar','amber'],
+CONNECTING:['Conectando…','amber'],CONNECTED:['Conectado · audio en directo','green'],RECONNECTING:['Reconectando…','amber'],
+@@ -287,7 +287,9 @@
 }
 
-function safeEqual(a, b) {
-  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
-  let r = 0;
-  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return r === 0;
+/* ---------- UI ---------- */
+let hostRoom=null,guestRoom=null;
+let hostRoom=null,guestRoom=null,rxr=null;
+const setJb=()=>{if(rxr)try{rxr.jitterBufferTarget=document.hidden?C.JBH:C.JB}catch{}};
+document.addEventListener('visibilitychange',setJb);   // pantalla apagada / pestaña en segundo plano: más buffer = sin cortes
+const tab=h=>{$('tG').classList.toggle('on',!h);$('tH').classList.toggle('on',h);$('pG').hidden=h;$('pH').hidden=!h};
+$('tG').onclick=()=>tab(false);$('tH').onclick=()=>tab(true);
+
+@@ -300,20 +302,28 @@
+d.setUint32(24,8000,true);d.setUint32(28,16000,true);d.setUint16(32,2,true);d.setUint16(34,16,true);w(36,'data');d.setUint32(40,1600,true);
+return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
 }
-
-async function roomExists(env, room) {
-  const r = await fetch(`${env.FIREBASE_DB_URL}/salas/${room}.json?shallow=true`);
-  if (!r.ok) return false;
-  return (await r.text()).trim() !== "null";
+function media(on){ // notificación multimedia del sistema: ayuda a que el móvil no corte el audio con la pantalla apagada
+  const m=navigator.mediaSession;if(!m)return;
+  try{
+    if(on){m.metadata=new MediaMetadata({title:'Shelyn',artist:'Escuchando en directo'});m.playbackState='playing';
+      m.setActionHandler('stop',()=>guestRoom&&guestRoom.end('IDLE'))}
+    else{m.playbackState='none';m.metadata=null;m.setActionHandler('stop',null)}
+  }catch{}
 }
-
-export default {
-  async fetch(request, env) {
-    if (!safeEqual(request.headers.get("X-Shelyn-Key") ?? "", env.SHELYN_KEY ?? "")) {
-      return json({ errorCode: "unauthorized", errorDescription: "bad key" }, 401);
-    }
-    const room = request.headers.get("X-Shelyn-Room") ?? "";
-    if (!/^[1-9]\d{3}$/.test(room)) return json({ errorCode: "bad_room", errorDescription: "bad room" }, 400);
-
-    const url = new URL(request.url);
-
-    // ---- TURN / STUN ----
-    if (request.method === "GET" && url.pathname === "/ice") {
-      const r = await fetch(
-        `${CF_BASE}/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${env.TURN_KEY_TOKEN}`, "content-type": "application/json" },
-          body: JSON.stringify({ ttl: 6 * 3600 }),
-        }
-      );
-      return new Response(await r.text(), { status: r.status, headers: { "content-type": "application/json" } });
-    }
-
-    // ---- SFU ----
-    const route = ROUTES.find((x) => x.method === request.method && x.re.test(url.pathname));
-    if (!route) return json({ errorCode: "not_found", errorDescription: "route not allowed" }, 404);
-
-    if (!(await roomExists(env, room))) {
-      return json({ errorCode: "room_not_found", errorDescription: "room does not exist" }, 403);
-    }
-
-    const len = Number(request.headers.get("content-length") ?? "0");
-    if (len > MAX_BODY) return json({ errorCode: "too_large", errorDescription: "body too large" }, 413);
-    const body = request.method === "GET" ? undefined : await request.text();
-    if (body && body.length > MAX_BODY) return json({ errorCode: "too_large", errorDescription: "body too large" }, 413);
-
-    const upstream = await fetch(`${CF_BASE}/apps/${env.CF_APP_ID}${url.pathname}`, {
-      method: request.method,
-      headers: { Authorization: `Bearer ${env.CF_APP_SECRET}`, "content-type": "application/json" },
-      body: body || undefined,
-    });
-    return new Response(await upstream.text(), {
-      status: upstream.status,
-      headers: { "content-type": "application/json" },
-    });
-  },
+const play=()=>a.play().then(()=>$('tap').hidden=true).catch(()=>$('tap').hidden=false);
+$('tap').onclick=play;
+function guestUi(s){
+pill($('gPill'),s);const live=LIVE(s);
+$('joinBtn').textContent=live?'Desconectar':'Unirse a la sala';$('joinBtn').className='btn'+(live?' stop':'');
+$('joinBtn').disabled=!live&&!codeOk();$('code').disabled=live;
+  if(!live){$('tap').hidden=true;a.srcObject=null;$('gStats').textContent=s==='FAILED'?'No se pudo contactar con el servidor. Revisa tu conexión a Internet.':''}
+  if(!live){rxr=null;media(false);$('tap').hidden=true;a.srcObject=null;$('gStats').textContent=s==='FAILED'?'No se pudo contactar con el servidor. Revisa tu conexión a Internet.':''}
+}
+$('joinBtn').onclick=()=>{
+if(guestRoom){guestRoom.end('IDLE');return}
+if(!codeOk())return;
+a.src=silentWav();a.play().catch(()=>{});                 // gesto del usuario: permite el audio después
+const r=guestRoom=new Room('guest',+$('code').value,guestUi);
+  r.onTrack=e=>{try{e.receiver.jitterBufferTarget=C.JB}catch{}a.srcObject=e.streams[0]||new MediaStream([e.track]);play()};
+  r.onTrack=e=>{rxr=e.receiver;setJb();a.srcObject=e.streams[0]||new MediaStream([e.track]);media(true);play()};
+r.onStats=t=>$('gStats').textContent=t;r.onEnd=()=>{guestRoom=null};r.guestStart();
 };
+// Auto-conexión por enlace: ?sala=1234  (hay que pulsar «Unirse» para que el navegador deje reproducir)
