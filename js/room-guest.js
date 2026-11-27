@@ -54,7 +54,7 @@ Object.assign(Room.prototype,{
   async writePresence(){
     if(this.dead||!this.myUid)return;
     try{
-      await fbPut(`salas/${this.code}/guests/${this.myUid}`,{hb:++this.hb,via:this.via});
+      await fbPut(`salas/${this.code}/guests/${this.myUid}`,{hb:++this.hb,via:this.via,name:nickName($('nick').value)});
       this.presenceOk=true;
     }catch{}
   },
@@ -67,10 +67,13 @@ Object.assign(Room.prototype,{
   // Si el host nos borra de guests/ (rechazo/expulsión), salimos
   async checkPresence(guests){
     if(!this.presenceOk||this.dead)return;
-    let me;
     if(guests===undefined){
-      try{me=await fbGet(`salas/${this.code}/guests/${this.myUid}`)}catch{return}
-    }else me=guests?guests[this.myUid]:null;
+      try{guests=await fbGet(`salas/${this.code}/guests`)}catch{return}
+      if(this.dead)return;
+    }
+    showPeople('gPeople',Object.entries(guests||{}).map(([id,g])=>
+      (nickName(g&&g.name)||'Invitado')+(id===this.myUid?' (tú)':'')+(g&&g.via==='wait'?' · en espera':'')).sort());
+    const me=guests?guests[this.myUid]:null;
     if(me){this.miss=0;return}
     if(++this.miss>=2){
       $('gStats').textContent='El anfitrión rechazó tu entrada.';
