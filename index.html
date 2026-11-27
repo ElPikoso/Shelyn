@@ -39,6 +39,9 @@
   .card{background:var(--card);padding:24px;border-radius:18px;max-width:340px;width:100%;border:1px solid #262b38}
   .card h2{font-size:1.1rem;margin-bottom:8px}
   #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1f2430;color:#fff;padding:10px 18px;border-radius:99px;font-size:.85rem;box-shadow:0 10px 25px rgba(0,0,0,.4);z-index:30}
+  .np{margin-bottom:14px}
+  .np summary{font-size:.8rem;color:var(--mut);cursor:pointer;margin-bottom:8px}
+  input.npf{font-size:.85rem;font-weight:500;letter-spacing:normal;text-align:left;padding:10px 12px;margin-bottom:8px}
   [hidden]{display:none!important}
 </style>
 </head>
@@ -70,6 +73,11 @@
       <div><label>CÓDIGO DE SALA</label><div id="hCode" class="code off">– – – –</div></div>
       <p id="hWarn" class="msg warn" role="alert"></p>
       <p id="hStats" class="note"></p>
+      <details class="np"><summary>En reproducción (opcional)</summary>
+        <input id="npTitle" class="npf" type="text" maxlength="149" placeholder="Título" autocomplete="off">
+        <input id="npArtist" class="npf" type="text" maxlength="149" placeholder="Artista" autocomplete="off">
+        <p class="note">Lo verán los invitados. Si dejas el título vacío no se publica nada.</p>
+      </details>
       <button id="shareBtn" class="btn sec" hidden>Compartir enlace</button>
       <button id="hostBtn" class="btn">Elegir pestaña y crear sala</button>
       <p class="note">Solo se transmite el audio de la pestaña elegida; el vídeo se descarta al instante.</p>
@@ -120,9 +128,31 @@ const toast=t=>{const el=$('toast');el.textContent=t;el.hidden=false;clearTimeou
 const codeOk=()=>/^[1-9][0-9]{3}$/.test($('code').value.trim());
 
 /* ---------- FIREBASE ANONYMOUS AUTH (JWT REAL) ---------- */
-let authState={token:null,uid:null,exp:0};
+let authState={token:null,uid:null,exp:0,refresh:null},authBusy=null;
 async function getAuth(){
   if(authState.token&&Date.now()<authState.exp)return authState;
+  if(!authBusy)authBusy=renewAuth().finally(()=>{authBusy=null});
+  return authBusy;
+}
+async function renewAuth(){
+  // 1) Renovar con refresh token: conserva el MISMO uid (necesario para seguir siendo owner de la sala).
+  //    Requiere "Token Service API" en las restricciones de la clave; si falla, se cae al paso 2.
+  if(authState.refresh){
+    try{
+      const r=await fetch(`https://securetoken.googleapis.com/v1/token?key=${C.KEY}`,{
+        method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:'grant_type=refresh_token&refresh_token='+encodeURIComponent(authState.refresh)
+      });
+      if(r.ok){
+        const d=await r.json();
+        authState={token:d.id_token,uid:d.user_id,refresh:d.refresh_token||authState.refresh,
+          exp:Date.now()+(Number(d.expires_in||3600)-120)*1000};
+        return authState;
+      }
+    }catch{}
+  }
+  // 2) Sesión anónima nueva
   const r=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${C.KEY}`,{
     method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -130,7 +160,8 @@ async function getAuth(){
   });
   if(!r.ok)throw new Error('Auth '+r.status);
   const d=await r.json();
-  authState={token:d.idToken,uid:d.localId,exp:Date.now()+(Number(d.expiresIn||3600)-120)*1000};
+  authState={token:d.idToken,uid:d.localId,refresh:d.refreshToken||null,
+    exp:Date.now()+(Number(d.expiresIn||3600)-120)*1000};
   return authState;
 }
 const fbUrl=(p,tok)=>`${C.DB}/${p}.json?auth=${encodeURIComponent(tok)}`;
@@ -536,6 +567,48 @@ function askModal(){
   });
 }
 
+/* ---------- NOW PLAYING (HOST) ---------- */
+const NP={auto:true,timer:null};
+// Quita contadores "(3) ", iconos y sufijos de web/navegador: " - YouTube Music", " - Spotify", " - Google Chrome"...
+function npClean(raw){
+  let s=String(raw||'').replace(/\s+/g,' ').trim();
+  s=s.replace(/^\(\d+\)\s*/,'').replace(/^[▶⏵🔊🔇]\s*/u,'');
+  const suf=/\s*[-–—|]\s*(YouTube Music|YouTube|Spotify(?:\s*[-–—]\s*Web Player)?|Google Chrome|Brave|Microsoft Edge|Mozilla Firefox|Firefox|Opera|SoundCloud|Deezer|Apple Music|Tidal|Amazon Music)\s*$/i;
+  let prev;
+  do{prev=s;s=s.replace(suf,'').trim()}while(s!==prev);
+  return s;
+}
+// Spotify web pone "Canción • Artista" en el título de la pestaña
+function npSplit(s){
+  const m=s.match(/^(.+?)\s[•·]\s(.+)$/);
+  return m?{title:m[1].trim(),artist:m[2].trim()}:{title:s,artist:''};
+}
+// Etiquetas técnicas (ids de captura) que no sirven como título
+const npTech=l=>!l||/^(web-contents-media-stream|screen:|window:|monitor|tab:|\w+:\d+:\d+)|:\/\//i.test(l)||/^(system audio|tab audio|audio de la pestaña|audio del sistema)$/i.test(l.trim());
+function npGuess(labels){
+  for(const l of labels){
+    if(npTech(l))continue;
+    const s=npClean(l);
+    if(s)return npSplit(s);
+  }
+  return {title:'',artist:''};
+}
+const npRead=()=>({title:$('npTitle').value.trim().slice(0,149),artist:$('npArtist').value.trim().slice(0,149)});
+async function npPublish(){
+  const r=hostRoom;
+  if(!r||r.dead||!r.roomReady)return;
+  const {title,artist}=npRead();
+  try{
+    if(!title){await fbDel(`salas/${r.code}/nowPlaying`);return}
+    await fbPut(`salas/${r.code}/nowPlaying`,{title,artist,updatedAt:Date.now()});
+  }catch{}
+}
+['npTitle','npArtist'].forEach(id=>$(id).addEventListener('input',()=>{
+  NP.auto=false;
+  clearTimeout(NP.timer);
+  NP.timer=setTimeout(npPublish,600);
+}));
+
 /* ---------- UI ---------- */
 let hostRoom=null,guestRoom=null,rxr=null;
 const setJb=()=>{
@@ -633,18 +706,24 @@ $('hostBtn').onclick=async()=>{
     $('hWarn').textContent='Permiso cancelado o navegador no compatible.';
     return;
   }
+  const npLabels=[...stream.getVideoTracks(),...stream.getAudioTracks()].map(t=>t.label);
   stream.getVideoTracks().forEach(t=>t.stop());
   if(!stream.getAudioTracks().length){
     $('hWarn').textContent='No marcaste "Compartir audio de la pestaña".';
     return;
   }
   stream.getAudioTracks().forEach(t=>{try{t.contentHint='music'}catch{}});
+  if(NP.auto||!$('npTitle').value.trim()){
+    const g=npGuess(npLabels);
+    if(g.title){$('npTitle').value=g.title;$('npArtist').value=g.artist;NP.auto=true}
+  }
   const code=Math.floor(1000+Math.random()*9000);
   $('hCode').textContent=code;$('hCode').className='code';
   const r=hostRoom=new Room('host',code,hostUi);
   r.onEnd=()=>{hostRoom=null};
   try{
     await r.hostStart(stream);
+    npPublish();
   }catch(e){
     $('hWarn').textContent='Error al crear la sala ('+(e&&e.message?e.message:'Firebase')+').';
     r.end('IDLE');
