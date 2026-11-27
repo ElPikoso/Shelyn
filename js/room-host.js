@@ -113,9 +113,10 @@ Object.assign(Room.prototype,{
     if(this.sfuActive&&this.pc&&!Object.values(this.gmap).some(e=>e.via==='p2p'))this.hostDropP2p();
     for(const [id,e] of Object.entries(this.gmap))if(e.status==='ok')this.trusted.add(id);
     this.persist();
-    showPeople('hPeople',Object.entries(this.gmap)
+    showPeople('hPeople',[{id:'__host',label:(nickName($('hNick').value)||'Anfitrión')+' (tú) · anfitrión'},
+      ...Object.entries(this.gmap)
       .map(([id,e])=>({id,label:(e.name||'Invitado')+(e.status==='ok'?'':' · pendiente')}))
-      .sort((x,y)=>x.label.localeCompare(y.label)),id=>this.kick(id));
+      .sort((x,y)=>x.label.localeCompare(y.label))],id=>this.kick(id));
     const n=Object.values(this.gmap).filter(e=>e.status==='ok').length;
     $('hStats').textContent=n?`${n} invitado${n>1?'s':''} escuchando`:'';
   },

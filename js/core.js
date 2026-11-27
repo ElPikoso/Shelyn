@@ -31,7 +31,7 @@ function showPeople(id,list,onKick){
     const row=document.createElement('span');
     row.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px';
     row.textContent=p.label??p;
-    if(onKick){
+    if(onKick&&p.id!=='__host'){
       const b=document.createElement('button');
       b.type='button';b.textContent='Echar';b.className='btn stop';
       b.style.cssText='width:auto;margin:0;padding:4px 10px';
