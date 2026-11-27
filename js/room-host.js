@@ -49,8 +49,11 @@ Object.assign(Room.prototype,{
   },
   hostSnap(d){
     if(d.answer&&d.answer.sdp&&!this.answered&&this.pc){
-      this.answered=true;
-      this.enqueue({kind:'p2p',ans:d.answer});
+      if(this.denied.has(d.answer.by))fbDel(`salas/${this.code}/answer`);   // expulsado
+      else{
+        this.answered=true;
+        this.enqueue({kind:'p2p',ans:d.answer});
+      }
     }
     if(d._only)return;
     if(d.guestCandidates)this.addCands(d.guestCandidates);
@@ -90,7 +93,9 @@ Object.assign(Room.prototype,{
     if(wantSfu&&!this.sfuActive&&!this.sfuBusy&&C.SFU_PROXY&&Date.now()>this.sfuFailAt)this.hostStartSfu();
     // Todos migraron al SFU: cerramos el P2P y limpiamos su señalización
     if(this.sfuActive&&this.pc&&!Object.values(this.gmap).some(e=>e.via==='p2p'))this.hostDropP2p();
-    showPeople('hPeople',Object.values(this.gmap).map(e=>(e.name||'Invitado')+(e.status==='ok'?'':' · en espera')).sort());
+    showPeople('hPeople',Object.entries(this.gmap)
+      .map(([id,e])=>({id,label:(e.name||'Invitado')+(e.status==='ok'?'':' · pendiente')}))
+      .sort((x,y)=>x.label.localeCompare(y.label)),id=>this.kick(id));
     const n=Object.values(this.gmap).filter(e=>e.status==='ok').length;
     $('hStats').textContent=n?`${n} invitado${n>1?'s':''} escuchando`:'';
   },
@@ -187,6 +192,35 @@ Object.assign(Room.prototype,{
       if(!this.dead)toast('No se pudo abrir la sala grupal');
     }finally{this.sfuBusy=false}
     this.hostEvaluate();
+  },
+  // Expulsa a un invitado; no puede volver a entrar en esta sala
+  async kick(id){
+    const e=this.gmap[id];
+    if(!e||this.dead)return;
+    this.denied.add(id);delete this.gmap[id];
+    // Ocupaba la conexión directa y no hay sala grupal: se corta y se ofrece una nueva
+    if(e.via==='p2p'&&!this.sfuActive){
+      try{await this.hostRearm()}catch{this.end('FAILED');return}
+    }
+    await fbDel(`salas/${this.code}/guests/${id}`);
+    this.hostEvaluate();
+  },
+  async hostRearm(){
+    const old=this.pc;this.pc=null;
+    if(old)old.close();
+    this.answered=true;                       // ignora la answer antigua hasta publicar la oferta nueva
+    this.p2pOk=false;this.backlog=null;this.seen=new Set();this.roomReady=false;this.pend=[];
+    const pc=await this.mkPc(false);
+    this.stream.getAudioTracks().forEach(t=>pc.addTrack(t,this.stream));
+    const off=await pc.createOffer();
+    off.sdp=tuneOpus(off.sdp);
+    await pc.setLocalDescription(off);
+    await boostSender(pc);
+    await fbPatch(`salas/${this.code}`,{offer:{type:'offer',sdp:off.sdp},answer:null,hostCandidates:null,guestCandidates:null});
+    this.roomReady=true;this.answered=false;
+    for(const p of this.pend)fbPost(`salas/${this.code}/hostCandidates`,p).catch(()=>{});
+    this.pend=[];
+    this.state('WAITING');
   },
   async hostDropP2p(){
     const pc=this.pc;
