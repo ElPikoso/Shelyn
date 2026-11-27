@@ -115,6 +115,22 @@ const pill=(el,s)=>{const [t,c]=ST[s]||ST.IDLE;el.textContent=t;el.className='pi
 const toast=t=>{const el=$('toast');el.textContent=t;el.hidden=false;clearTimeout(el._t);el._t=setTimeout(()=>el.hidden=true,2600)};
 const codeOk=()=>/^[1-9][0-9]{3}$/.test($('code').value.trim());
 
+/* ---------- FIREBASE ANONYMOUS AUTH (JWT REAL) ---------- */
+let authState={token:null,uid:null,exp:0};
+async function getAuth(){
+  if(authState.token&&Date.now()<authState.exp)return authState;
+  const r=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${C.KEY}`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({returnSecureToken:true})
+  });
+  if(!r.ok)throw new Error('Auth '+r.status);
+  const d=await r.json();
+  authState={token:d.idToken,uid:d.localId,exp:Date.now()+(Number(d.expiresIn||3600)-120)*1000};
+  return authState;
+}
+const fbUrl=(p,tok)=>`${C.DB}/${p}.json?auth=${encodeURIComponent(tok)}`;
+
 /* ---------- SDP OPUS (80 kbps estéreo + FEC + ptime 20) ---------- */
 function tuneOpus(sdp){
   const lines=sdp.split('\r\n');
@@ -142,13 +158,12 @@ function tuneOpus(sdp){
   return out.join('\r\n');
 }
 
-/* ---------- FIREBASE REST + SSE ---------- */
-const fbUrl=p=>`${C.DB}/${p}.json?auth=${C.KEY}`;
-async function fbGet(p){const r=await fetch(fbUrl(p));if(!r.ok)throw new Error(r.status);return r.json()}
-async function fbPut(p,d){const r=await fetch(fbUrl(p),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status)}
-async function fbPatch(p,d){const r=await fetch(fbUrl(p),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status)}
-async function fbPost(p,d){const r=await fetch(fbUrl(p),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status)}
-async function fbDel(p){await fetch(fbUrl(p),{method:'DELETE'}).catch(()=>{})}
+/* ---------- FIREBASE REST + SSE AUTENTICADO ---------- */
+async function fbGet(p){const {token}=await getAuth();const r=await fetch(fbUrl(p,token));if(!r.ok)throw new Error(r.status);return r.json()}
+async function fbPut(p,d){const {token}=await getAuth();const r=await fetch(fbUrl(p,token),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status)}
+async function fbPatch(p,d){const {token}=await getAuth();const r=await fetch(fbUrl(p,token),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status)}
+async function fbPost(p,d){const {token}=await getAuth();const r=await fetch(fbUrl(p,token),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});if(!r.ok)throw new Error(r.status)}
+async function fbDel(p){try{const {token}=await getAuth();await fetch(fbUrl(p,token),{method:'DELETE'})}catch{}}
 
 /* ---------- GESTOR WEBRTC ---------- */
 class Room{
@@ -186,8 +201,10 @@ class Room{
     this.pc=pc;
     return pc;
   }
-  listen(path,cb){
-    const es=new EventSource(fbUrl(path));
+  async listen(path,cb){
+    const {token}=await getAuth();
+    if(this.dead)return;
+    const es=new EventSource(fbUrl(path,token));
     const handle=ev=>{
       if(this.dead)return;
       try{const d=JSON.parse(ev.data);if(d&&d.data!==undefined)cb(d.path,d.data)}catch{}
@@ -209,15 +226,16 @@ class Room{
     this.stream=stream;
     stream.getAudioTracks()[0].onended=()=>this.end('IDLE');
     this.state('CREATING');
+    const {uid}=await getAuth();
     const pc=this.mkPc();
     stream.getAudioTracks().forEach(t=>pc.addTrack(t,stream));
     const off=await pc.createOffer();
     off.sdp=tuneOpus(off.sdp);
     await pc.setLocalDescription(off);
-    await fbPut(`salas/${this.code}`,{offer:{type:'offer',sdp:off.sdp}});
+    await fbPut(`salas/${this.code}`,{owner:uid,offer:{type:'offer',sdp:off.sdp}});
     this.state('WAITING');
     let answered=false;
-    this.listen(`salas/${this.code}`,async(p,d)=>{
+    await this.listen(`salas/${this.code}`,async(p,d)=>{
       if(p==='/'&&d){
         if(d.answer&&!answered){answered=true;await this.askApproval(d.answer)}
         if(d.guestCandidates)await this.addCands(d.guestCandidates);
@@ -254,7 +272,7 @@ class Room{
     await pc.setLocalDescription(ans);
     await fbPatch(`salas/${this.code}`,{answer:{type:'answer',sdp:ans.sdp}});
     if(room.hostCandidates)await this.addCands(room.hostCandidates);
-    this.listen(`salas/${this.code}/hostCandidates`,async(p,d)=>{
+    await this.listen(`salas/${this.code}/hostCandidates`,async(p,d)=>{
       if(p==='/')await this.addCands(d);
       else if(d)await this.addCands({[p.slice(1)]:d});
     });
@@ -334,7 +352,7 @@ $('joinBtn').onclick=()=>{
   const r=guestRoom=new Room('guest',+$('code').value.trim(),guestUi);
   r.onTrack=e=>{rxr=e.receiver;setJb();a.srcObject=e.streams[0]||new MediaStream([e.track]);media(true);play()};
   r.onEnd=()=>{guestRoom=null};
-  r.guestStart();
+  r.guestStart().catch(()=>r.end('FAILED'));
 };
 
 /* ---------- CONTROLES HOST ---------- */
