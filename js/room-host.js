@@ -69,6 +69,7 @@ Object.assign(Room.prototype,{
       if(!e)e=this.gmap[id]={status:'new',via:'wait',hb:null,seen:now};
       if(e.hb!==g.hb){e.hb=g.hb;e.seen=now}
       if(typeof g.via==='string')e.via=g.via;
+      e.name=nickName(g.name);
     }
     for(const [id,e] of Object.entries(this.gmap)){
       if(now-e.seen>C.STALE_MS){delete this.gmap[id];fbDel(`salas/${this.code}/guests/${id}`)}
@@ -89,6 +90,7 @@ Object.assign(Room.prototype,{
     if(wantSfu&&!this.sfuActive&&!this.sfuBusy&&C.SFU_PROXY&&Date.now()>this.sfuFailAt)this.hostStartSfu();
     // Todos migraron al SFU: cerramos el P2P y limpiamos su señalización
     if(this.sfuActive&&this.pc&&!Object.values(this.gmap).some(e=>e.via==='p2p'))this.hostDropP2p();
+    showPeople('hPeople',Object.values(this.gmap).map(e=>(e.name||'Invitado')+(e.status==='ok'?'':' · en espera')).sort());
     const n=Object.values(this.gmap).filter(e=>e.status==='ok').length;
     $('hStats').textContent=n?`${n} invitado${n>1?'s':''} escuchando`:'';
   },
@@ -116,7 +118,8 @@ Object.assign(Room.prototype,{
   },
   async handleP2pAnswer(ans){
     this.state('APPROVAL');
-    const ok=await askModal();
+    const who=ans.by?await fbGet(`salas/${this.code}/guests/${ans.by}/name`).catch(()=>null):null;
+    const ok=await askModal(who);
     if(this.dead)return;
     if(!ok||!this.pc){
       await fbDel(`salas/${this.code}/answer`);
@@ -140,7 +143,7 @@ Object.assign(Room.prototype,{
   async handleWaiter(id){
     if(!this.gmap[id])return;
     this.state('APPROVAL');
-    const ok=await askModal();
+    const ok=await askModal(this.gmap[id].name);
     if(this.dead)return;
     const e=this.gmap[id];
     if(!e)return;           // se fue mientras decidías
@@ -196,9 +199,10 @@ Object.assign(Room.prototype,{
 });
 
 /* ---------- MODAL APROBACIÓN HOST ---------- */
-function askModal(){
+function askModal(name){
   return new Promise(res=>{
     const m=$('modal');m.hidden=false;
+    m.querySelector('h2').textContent=`${nickName(name)||'Un invitado'} quiere unirse`;
     const oldTitle=document.title;
     if(document.hidden)document.title='⚠ Invitado esperando · Shelyn';
     const done=v=>{clearTimeout(t);m.hidden=true;document.title=oldTitle;$('yes').onclick=$('no').onclick=null;res(v)};
