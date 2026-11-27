@@ -42,6 +42,20 @@
   .np{margin-bottom:14px}
   .np summary{font-size:.8rem;color:var(--mut);cursor:pointer;margin-bottom:8px}
   input.npf{font-size:.85rem;font-weight:500;letter-spacing:normal;text-align:left;padding:10px 12px;margin-bottom:8px}
+  .npc{display:flex;align-items:center;gap:12px;background:var(--in);border:1px solid #262b38;border-radius:14px;padding:10px;margin-bottom:16px}
+  .npc .art{flex:none;width:56px;height:56px;border-radius:10px;background:linear-gradient(135deg,var(--acc),#a855f7);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
+  .npc .art img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  .npc .art svg{width:26px;height:26px;fill:#fff;opacity:.95}
+  .npi{flex:1;min-width:0}
+  .npt{font-size:.95rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .npa{font-size:.8rem;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+  .eq{flex:none;display:flex;align-items:flex-end;gap:3px;height:18px;margin-right:4px}
+  .eq i{display:block;width:3px;height:100%;background:var(--acc);border-radius:2px;transform-origin:bottom;animation:eq 1s ease-in-out infinite}
+  .eq i:nth-child(2){animation-delay:-.4s;background:#818cf8}
+  .eq i:nth-child(3){animation-delay:-.75s}
+  .npc.paused .eq i{animation-play-state:paused;transform:scaleY(.25)}
+  @keyframes eq{0%,100%{transform:scaleY(.25)}50%{transform:scaleY(1)}}
+  @media (prefers-reduced-motion:reduce){.eq i{animation:none;transform:scaleY(.6)}}
   [hidden]{display:none!important}
 </style>
 </head>
@@ -59,6 +73,14 @@
   <!-- PANEL INVITADO -->
   <section id="pG">
     <div id="gPill" class="pill grey">Desconectado</div>
+    <div id="npCard" class="npc" aria-live="polite" hidden>
+      <div class="art">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
+        <img id="npImg" alt="" referrerpolicy="no-referrer" hidden>
+      </div>
+      <div class="npi"><div id="npT" class="npt">Audio en directo</div><div id="npA" class="npa">Sin título de pista</div></div>
+      <div class="eq" aria-hidden="true"><i></i><i></i><i></i></div>
+    </div>
     <label for="code">CÓDIGO DE SALA</label>
     <input id="code" type="text" inputmode="numeric" maxlength="4" placeholder="0000" autocomplete="off">
     <button id="tap" class="btn sec" hidden>Tocar para activar sonido</button>
@@ -263,6 +285,7 @@ class Room{
     this.pend=[];             // candidatos del host a publicar cuando la sala exista
     this.roomReady=false;
     this.connTimer=null;
+    this.npEs=null;this.npTimer=null;this.npRetry=null;this.npRaw=null; // nowPlaying (invitado)
   }
   state(s){if(!this.dead)this.onState(s)}
   async mkPc(isSfu=false){
@@ -432,6 +455,43 @@ class Room{
     const g=await fbGet(`salas/${this.code}/guestCandidates`).catch(()=>null);
     await this.addCands(g);
   }
+  // nowPlaying del invitado: SSE propio (independiente de P2P/SFU) + sondeo lento de respaldo
+  startNp(){
+    const open=async()=>{
+      if(this.dead)return;
+      let token;
+      try{({token}=await getAuth())}catch{this.npRetry=setTimeout(open,5000);return}
+      if(this.dead)return;
+      if(this.npEs)this.npEs.close();
+      const es=new EventSource(fbUrl(`salas/${this.code}/nowPlaying`,token));
+      this.npEs=es;
+      const onData=ev=>{
+        if(this.dead)return;
+        try{
+          const d=JSON.parse(ev.data);if(!d)return;
+          const p=d.path||'/';
+          if(p==='/'){
+            this.npRaw=(ev.type==='patch'&&this.npRaw&&d.data&&typeof d.data==='object')?{...this.npRaw,...d.data}:d.data;
+          }else{
+            const k=p.split('/').filter(Boolean)[0];
+            if(!this.npRaw||typeof this.npRaw!=='object')this.npRaw={};
+            this.npRaw[k]=d.data;
+          }
+          applyNp(this.npRaw);
+        }catch{}
+      };
+      es.addEventListener('put',onData);
+      es.addEventListener('patch',onData);
+      // Token caducado: reabrir con uno nuevo
+      es.addEventListener('auth_revoked',()=>{es.close();if(!this.dead)this.npRetry=setTimeout(open,500)});
+      es.onerror=()=>{if(!this.dead&&es.readyState===EventSource.CLOSED)this.npRetry=setTimeout(open,4000)};
+    };
+    open();
+    this.npTimer=setInterval(()=>{
+      if(this.dead)return;
+      fbGet(`salas/${this.code}/nowPlaying`).then(v=>{if(!this.dead){this.npRaw=v;applyNp(v)}}).catch(()=>{});
+    },20000);
+  }
   async guestStart(){
     this.state('CONNECTING');
     $('gStats').textContent='Buscando sala…';
@@ -445,8 +505,10 @@ class Room{
     },C.CONN_MS);
     const {uid}=await getAuth();
     this.myUid=uid;
+    this.startNp();
     const room=await fbGet(`salas/${this.code}`).catch(()=>null);
     if(!room||(!room.offer&&!room.sfu)){this.end('FAILED');return}
+    if(room.nowPlaying)applyNp(room.nowPlaying);
 
     if(room.sfu&&room.sfu.sessionId&&room.sfu.trackName){
       await this.connectSfuGuest(room.sfu);
@@ -473,6 +535,7 @@ class Room{
       if(this.pc&&this.pc.connectionState==='connected'){clearInterval(this.timer);return}
       const snap=await fbGet(`salas/${this.code}`).catch(()=>null);
       if(!snap)return;
+      if(snap.nowPlaying)applyNp(snap.nowPlaying);
       if(snap.sfu&&snap.sfu.sessionId&&snap.sfu.trackName&&this.mode!=='sfu'){
         await this.connectSfuGuest(snap.sfu);
         return;
@@ -483,11 +546,14 @@ class Room{
     await this.listen(`salas/${this.code}`,async(p,d)=>{
       if(this.dead)return;
       if(p==='/'&&d){
+        if(d.nowPlaying)applyNp(d.nowPlaying);
         if(d.sfu&&d.sfu.sessionId&&d.sfu.trackName&&this.mode!=='sfu'){
           await this.connectSfuGuest(d.sfu);
           return;
         }
         if(d.hostCandidates)await this.addCands(d.hostCandidates);
+      }else if(p==='/nowPlaying'&&d&&typeof d==='object'){
+        applyNp(d);
       }else if(p==='/sfu'&&d&&d.sessionId&&d.trackName&&this.mode!=='sfu'){
         await this.connectSfuGuest(d);
       }else if(p.startsWith('/hostCandidates')&&this.mode==='p2p'){
@@ -545,6 +611,8 @@ class Room{
     clearInterval(this.timer);
     clearTimeout(this.connTimer);
     if(this.es)this.es.close();
+    clearInterval(this.npTimer);clearTimeout(this.npRetry);
+    if(this.npEs)this.npEs.close();
     if(this.pc)this.pc.close();
     if(this.stream)this.stream.getTracks().forEach(t=>t.stop());
     if(this.role==='host')fbDel(`salas/${this.code}`);
@@ -629,11 +697,67 @@ function silentWav(){
   return URL.createObjectURL(new Blob([b],{type:'audio/wav'}));
 }
 
+/* ---------- NOW PLAYING (INVITADO): estado, tarjeta y Media Session ---------- */
+let npCur=null,npVisible=false,mediaOn=false,npDefArt=null;
+const npUrl=u=>typeof u==='string'&&u.length<=500&&/^https?:\/\//i.test(u)?u:'';
+const npTxt=v=>String(v==null?'':v).replace(/\s+/g,' ').trim().slice(0,149);
+function npNorm(raw){
+  if(!raw||typeof raw!=='object')return null;
+  const title=npTxt(raw.title);
+  if(!title)return null;
+  return {title,artist:npTxt(raw.artist),artwork:npUrl(raw.artwork),updatedAt:Number(raw.updatedAt)||0};
+}
+function applyNp(raw){
+  const n=npNorm(raw);
+  if(n&&npCur&&n.updatedAt&&npCur.updatedAt&&n.updatedAt<npCur.updatedAt)return; // dato antiguo (sondeo tardío)
+  if(JSON.stringify(n)===JSON.stringify(npCur))return;
+  npCur=n;renderNp();if(mediaOn)mediaMeta();
+}
+function renderNp(){
+  const c=$('npCard'),n=npCur,img=$('npImg');
+  c.hidden=!npVisible;
+  $('npT').textContent=n?n.title:'Audio en directo';
+  $('npA').textContent=n?(n.artist||'Audio en directo'):'Sin título de pista';
+  if(n&&n.artwork){
+    if(img.dataset.src!==n.artwork){img.dataset.src=n.artwork;img.hidden=true;img.src=n.artwork}
+  }else{
+    delete img.dataset.src;img.hidden=true;img.removeAttribute('src');
+  }
+}
+function npReset(){npCur=null;npVisible=false;renderNp()}
+// Carátula por defecto (PNG 512 generado con canvas) para la pantalla de bloqueo
+function defArt(){
+  if(npDefArt)return npDefArt;
+  try{
+    const c=document.createElement('canvas');c.width=c.height=512;
+    const x=c.getContext('2d'),g=x.createLinearGradient(0,0,512,512);
+    g.addColorStop(0,'#6366f1');g.addColorStop(1,'#a855f7');
+    x.fillStyle=g;x.fillRect(0,0,512,512);
+    x.fillStyle='#fff';
+    [140,260,200,300,170].forEach((h,i)=>x.fillRect(92+i*68,256-h/2,40,h));
+    npDefArt=[{src:c.toDataURL('image/png'),sizes:'512x512',type:'image/png'}];
+  }catch{npDefArt=[]}
+  return npDefArt;
+}
+function mediaMeta(){
+  const m=navigator.mediaSession;if(!m||typeof MediaMetadata==='undefined')return;
+  try{
+    const n=npCur;
+    m.metadata=new MediaMetadata({
+      title:n?n.title:'Shelyn · Audio en directo',
+      artist:n?(n.artist||'Audio en directo'):'Escuchando en directo',
+      album:'Shelyn',
+      artwork:n&&n.artwork?[{src:n.artwork,sizes:'512x512'}]:defArt()
+    });
+  }catch{}
+}
+
 function media(on){
+  mediaOn=!!on;
   const m=navigator.mediaSession;if(!m)return;
   try{
     if(on){
-      m.metadata=new MediaMetadata({title:'Shelyn',artist:'Escuchando en directo'});
+      mediaMeta();
       m.playbackState='playing';
       m.setActionHandler('stop',()=>guestRoom&&guestRoom.end('IDLE'));
     }else{
@@ -651,7 +775,11 @@ function guestUi(s){
   $('joinBtn').className='btn'+(live?' stop':'');
   $('joinBtn').disabled=!live&&!codeOk();
   $('code').disabled=live;
-  if(!live){
+  if(live){
+    npVisible=(s==='CONNECTED'||s==='CONNECTED_SFU'||s==='RECONNECTING');
+    renderNp();$('npCard').classList.toggle('paused',s==='RECONNECTING');
+  }else{
+    npReset();
     rxr=null;media(false);$('tap').hidden=true;a.srcObject=null;
     if(s==='FAILED'&&!$('gStats').textContent.startsWith('El anfitrión'))
       $('gStats').textContent='No se pudo contactar con el servidor o la sala no existe.';
@@ -729,6 +857,10 @@ $('hostBtn').onclick=async()=>{
     r.end('IDLE');
   }
 };
+
+// Carátula: mostrar solo si carga; si falla, queda el icono
+$('npImg').onload=()=>{$('npImg').hidden=false};
+$('npImg').onerror=()=>{$('npImg').hidden=true};
 
 // Auto-rellenar código desde ?sala=1234
 const q=new URLSearchParams(location.search).get('sala');
